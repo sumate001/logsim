@@ -12,9 +12,10 @@
 4. [เพิ่ม Log Formatter ใหม่](#4-เพิ่ม-log-formatter-ใหม่)
 5. [เพิ่ม Node Type ใหม่](#5-เพิ่ม-node-type-ใหม่)
 6. [เพิ่ม API Endpoint ใหม่](#6-เพิ่ม-api-endpoint-ใหม่)
-7. [แก้ไข Frontend Canvas](#7-แก้ไข-frontend-canvas)
-8. [ทดสอบ](#8-ทดสอบ)
-9. [Style guide](#9-style-guide)
+7. [เพิ่ม Output Destination ใหม่](#7-เพิ่ม-output-destination-ใหม่)
+8. [แก้ไข Frontend Canvas](#8-แก้ไข-frontend-canvas)
+9. [ทดสอบ](#9-ทดสอบ)
+10. [Style guide](#10-style-guide)
 
 ---
 
@@ -49,14 +50,23 @@ npm run dev
 POST /api/simulate
       │
       ▼
-main.py          ← รับ JSON request, สร้าง background job
+main.py          ← รับ JSON request, validate OutputDest, สร้าง background job
       │
       ▼
 simulate.py
-  _parse_topology()   ← JSON dict → Topology dataclass
-  scenario_func()     ← Topology → List[Event]     (scenarios.py)
-  _make_baseline()    ← Topology → List[Event]     (formatters.py)
-  _write_logs()       ← events → .log files + ground_truth.*
+  _parse_topology()        ← JSON dict → Topology dataclass
+  scenario_func()          ← Topology → List[Event]     (scenarios.py)
+  _make_baseline()         ← Topology → List[Event]     (formatters.py)
+  
+  ── output routing ────────────────────────────────────────────────
+  output_dest == "file"
+    _write_logs()          ← events → per-source .log + ground_truth.*
+  output_dest == "rsyslog_udp"
+    _send_rsyslog_udp()    ← events → UDP packets (RFC 5424)
+    _write_ground_truth()  ← events → ground_truth.* only
+  output_dest == "victoria_logs"
+    _send_victoria_logs()  ← events → HTTP POST NDJSON
+    _write_ground_truth()  ← events → ground_truth.* only
 ```
 
 **Event tuple**: `(delta_sec: float, log_line: str, label: str, node_id: str)`
@@ -73,7 +83,7 @@ simulate.py
 | `topology.py` | dataclasses: `Topology`, `NetNode`, `NetEdge`, `SvcNode`, `SvcEdge` และ enums `NodeRole`, `NodeTech` |
 | `formatters.py` | ฟังก์ชันสร้าง log string ที่สมจริงต่อ technology (Cisco IOS, HAProxy, Nginx, Python, Node.js, MySQL, Redis, syslog) |
 | `scenarios.py` | ฟังก์ชัน 5 scenarios คืนค่า `List[Event]` — ใช้ Topology หา node ที่เกี่ยวข้อง |
-| `simulate.py` | engine หลัก: parse topology, เรียก scenario, สร้าง baseline, เขียนไฟล์ |
+| `simulate.py` | engine หลัก: parse topology, เรียก scenario, สร้าง baseline, **route output** (`OutputDest`: file / rsyslog UDP / Victoria Logs) |
 | `main.py` | FastAPI routes, Pydantic models, background task management |
 
 ### Frontend component tree
@@ -310,7 +320,117 @@ async def my_endpoint(req: MyRequest):
 
 ---
 
-## 7. แก้ไข Frontend Canvas
+## 7. เพิ่ม Output Destination ใหม่
+
+Output Destination คือตัวเลือกว่า log ที่สร้างจะไปที่ไหน ปัจจุบันมี `file`, `rsyslog_udp`, `victoria_logs`
+
+### ขั้นที่ 1 — เพิ่มค่าใน `OutputDest` enum (`backend/simulate.py`)
+
+```python
+class OutputDest(str, enum.Enum):
+    FILE          = "file"
+    RSYSLOG_UDP   = "rsyslog_udp"
+    VICTORIA_LOGS = "victoria_logs"
+    LOKI          = "loki"       # ← ใหม่
+```
+
+### ขั้นที่ 2 — เขียน sender function ใน `backend/simulate.py`
+
+```python
+def _send_loki(
+    events: List[Tuple[float, str, str, str]],
+    topo: Topology,
+    url: str,
+) -> Tuple[int, Optional[str]]:
+    """POST events ไปยัง Loki /loki/api/v1/push (JSON format)
+    Returns (lines_sent, error_msg_or_None).
+    """
+    all_nodes = {n.id: n for n in topo.net_nodes}
+    all_nodes.update({n.id: n for n in topo.svc_nodes})
+    base_ts = datetime.utcnow()
+
+    streams = {}   # label_key → list of [ts_ns_str, line]
+    for delta, line, label, node_id in events:
+        node   = all_nodes.get(node_id)
+        host_f = (node.label if node else node_id) or "logsim2"
+        ts_ns  = str(int((base_ts + timedelta(seconds=delta)).timestamp() * 1e9))
+        key    = f'{{"host":"{host_f}","label":"{label}"}}'
+        streams.setdefault(key, [])
+        for sub in line.split("\n"):
+            sub = sub.strip()
+            if sub:
+                streams[key].append([ts_ns, sub])
+
+    body = json.dumps({
+        "streams": [{"stream": json.loads(k), "values": v} for k, v in streams.items()]
+    }).encode("utf-8")
+
+    req = _urllib_req.Request(url, data=body, method="POST",
+                              headers={"Content-Type": "application/json"})
+    try:
+        with _urllib_req.urlopen(req, timeout=30) as _:
+            return sum(len(v) for v in streams.values()), None
+    except _urllib_err.HTTPError as exc:
+        return 0, f"HTTP {exc.code}: {exc.reason}"
+    except Exception as exc:
+        return 0, str(exc)
+```
+
+### ขั้นที่ 3 — เพิ่ม routing ใน `run_simulation()` (`backend/simulate.py`)
+
+```python
+elif dest == OutputDest.LOKI:
+    job.progress = 0.65
+    job.message  = "Sending to Loki…"
+    await asyncio.sleep(0)
+    sent, err = _send_loki(all_events, topo, config.loki_url)
+    if err:
+        raise RuntimeError(f"Loki: {err}")
+    _write_ground_truth(config.output_dir, all_events)
+```
+
+### ขั้นที่ 4 — เพิ่ม field ใน `SimConfig` dataclass
+
+```python
+loki_url: str = "http://localhost:3100/loki/api/v1/push"
+```
+
+### ขั้นที่ 5 — เพิ่มใน `SimulateRequest` Pydantic model (`backend/main.py`)
+
+```python
+loki_url: str = "http://localhost:3100/loki/api/v1/push"
+```
+
+และส่งต่อใน `SimConfig(...)`:
+
+```python
+loki_url=req.loki_url,
+```
+
+### ขั้นที่ 6 — เพิ่มปุ่มและ config field ใน `SimulationDrawer.tsx`
+
+```typescript
+// เพิ่มใน DEST_TABS array
+{ key: "loki", label: "🟡  Loki", hint: "POST to Grafana Loki /loki/api/v1/push" },
+
+// เพิ่ม state
+const [lokiUrl, setLokiUrl] = useState("http://localhost:3100/loki/api/v1/push");
+
+// เพิ่ม conditional config section
+{outputDest === "loki" && (
+  <div>
+    <label className="text-xs text-slate-400 block mb-1">Loki Push URL</label>
+    <input value={lokiUrl} onChange={(e) => setLokiUrl(e.target.value)} className={inputCls} />
+  </div>
+)}
+
+// เพิ่มใน startSim body
+loki_url: lokiUrl,
+```
+
+---
+
+## 8. แก้ไข Frontend Canvas
 
 ### การทำงานของ SVG canvas
 
@@ -362,7 +482,7 @@ setFitNet(v => v + 1);
 
 ---
 
-## 8. ทดสอบ
+## 9. ทดสอบ
 
 ### Backend — unit test
 
@@ -399,6 +519,59 @@ asyncio.run(test())
 "
 ```
 
+### Backend — test output destinations
+
+```bash
+cd backend
+# ทดสอบ rsyslog UDP (ฟัง port 9514 ก่อน แล้วรัน)
+python3 -c "
+import asyncio
+from simulate import SimConfig, OutputDest, create_job, run_simulation, get_job
+
+async def test():
+    cfg = SimConfig(
+        topology={'netNodes':[],'netEdges':[],'svcNodes':[],'svcEdges':[]},
+        scenario='mysql_cascade',
+        output_dest=OutputDest.RSYSLOG_UDP,
+        rsyslog_host='127.0.0.1',
+        rsyslog_port=9514,
+    )
+    jid = create_job()
+    await run_simulation(jid, cfg)
+    job = get_job(jid)
+    print('status:', job.status)
+    print('sent_lines:', job.stats.get('sent_lines'))
+
+asyncio.run(test())
+"
+
+# รัน netcat เป็น UDP listener ก่อน (terminal แยก)
+# nc -ulk 9514
+```
+
+```bash
+# ทดสอบ Victoria Logs (ต้องมี VictoriaLogs รันอยู่ หรือใช้ nc)
+python3 -c "
+import asyncio
+from simulate import SimConfig, OutputDest, create_job, run_simulation, get_job
+
+async def test():
+    cfg = SimConfig(
+        topology={'netNodes':[],'netEdges':[],'svcNodes':[],'svcEdges':[]},
+        scenario='oom_cascade',
+        output_dest=OutputDest.VICTORIA_LOGS,
+        victoria_logs_url='http://localhost:9428/insert/jsonline',
+    )
+    jid = create_job()
+    await run_simulation(jid, cfg)
+    job = get_job(jid)
+    print('status:', job.status)    # failed ถ้า VictoriaLogs ไม่ running
+    print('message:', job.message)
+
+asyncio.run(test())
+"
+```
+
 ### Frontend — manual checklist
 
 - [ ] เพิ่ม node ทุก type แล้วดูสีและรูปร่างถูกต้อง
@@ -407,11 +580,13 @@ asyncio.run(test())
 - [ ] Add Edge → source highlight → คลิก target → edge ปรากฏ
 - [ ] Import JSON → โหลด nodes+edges → toast แสดงสรุป
 - [ ] Export JSON → import กลับมาได้ (round-trip)
-- [ ] Run Simulation → progress bar → stats cards
+- [ ] Run Simulation (File) → progress bar → stats cards → ไฟล์ .log
+- [ ] Run Simulation (rsyslog UDP) → banner "Sent X lines" → เฉพาะ ground_truth ใน Files
+- [ ] Run Simulation (Victoria Logs) → banner ถ้าสำเร็จ หรือ error ถ้า endpoint ไม่มี
 
 ---
 
-## 9. Style Guide
+## 10. Style Guide
 
 ### Python
 

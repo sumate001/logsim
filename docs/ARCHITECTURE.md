@@ -49,10 +49,15 @@
 │  │  scenarios.SCENARIOS[name]["func"](topo)  →  List[Event]     │   │
 │  │  _make_baseline(topo, duration)  →  List[Event]              │   │
 │  │  all_events = fault + baseline → sort by delta_sec           │   │
-│  │  _write_logs(output_dir, all_events, topo)                   │   │
-│  │    → {node_label}_{tech}.log  (per source)                   │   │
-│  │    → ground_truth.log                                        │   │
-│  │    → ground_truth.json                                       │   │
+│  │                                                              │   │
+│  │  ── output routing (OutputDest) ───────────────────────────  │   │
+│  │  "file"          → _write_logs()                             │   │
+│  │                      → {node_label}_{tech}.log (per source)  │   │
+│  │                      → ground_truth.log / .json              │   │
+│  │  "rsyslog_udp"   → _send_rsyslog_udp()  RFC 5424 UDP         │   │
+│  │                    + _write_ground_truth()                   │   │
+│  │  "victoria_logs" → _send_victoria_logs()  HTTP NDJSON POST   │   │
+│  │                    + _write_ground_truth()                   │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
                          │
@@ -141,20 +146,51 @@ async def run_simulation(job_id, config):
     else:
         all_events = fault_events
 
-    # 4. sort by time and write
+    # 4. sort by time, route to output destination
     all_events.sort(key=lambda x: x[0])
-    _write_logs(config.output_dir, all_events, topo)
+
+    if config.output_dest == OutputDest.RSYSLOG_UDP:
+        sent, err = _send_rsyslog_udp(all_events, topo, host, port)
+        _write_ground_truth(output_dir, all_events)
+
+    elif config.output_dest == OutputDest.VICTORIA_LOGS:
+        sent, err = _send_victoria_logs(all_events, topo, url)
+        _write_ground_truth(output_dir, all_events)
+
+    else:  # FILE (default)
+        _write_logs(config.output_dir, all_events, topo)
 
     # 5. compute stats and store in job
-    job.stats = { "total_lines", "normal", "anomaly", "attacks", ... }
+    job.stats = {
+        "total_lines", "normal", "anomaly", "attacks",
+        "output_dest",   # "file" | "rsyslog_udp" | "victoria_logs"
+        "sent_lines",    # จำนวน line ที่ส่ง (None สำหรับ file mode)
+        ...
+    }
 ```
 
-**_write_logs** grouping:
-- group events by `node_id`
-- sort each group by `delta_sec`
-- write to `{node.label}_{node.tech}.log`
-- write ground_truth.log: `LABEL|node_id|+delta_s|first_line`
-- write ground_truth.json: structured array
+**OutputDest enum**
+
+| ค่า | การทำงาน | ฟังก์ชัน |
+|-----|----------|---------|
+| `file` | เขียน per-source .log + ground_truth | `_write_logs()` |
+| `rsyslog_udp` | ส่ง RFC 5424 UDP packet ทุกบรรทัด + ground_truth | `_send_rsyslog_udp()` |
+| `victoria_logs` | POST NDJSON batch + ground_truth | `_send_victoria_logs()` |
+
+**_send_rsyslog_udp** — สร้าง RFC 5424 message:
+- `<PRI>1 TIMESTAMP HOSTNAME APP-NAME - LABEL - MSG`
+- PRI = facility 1 (user) × 8 + severity (3=RC, 4=PROP, 5=SYM, 6=NORMAL)
+- ใช้ `socket.SOCK_DGRAM` ส่งทุก sub-line (multi-line log)
+
+**_send_victoria_logs** — NDJSON format:
+```json
+{"_msg": "log line", "_time": "ISO_TS", "host": "node_label", "tech": "nginx", "label": "ROOT_CAUSE", "node_id": "web1"}
+```
+ส่งทั้งหมดใน request เดียว — `Content-Type: application/stream+json`
+
+**_write_ground_truth** (แยกจาก _write_logs):
+- เขียนเฉพาะ fault events (ไม่รวม NORMAL)
+- สร้าง `ground_truth.log` และ `ground_truth.json` เสมอ ไม่ว่าจะเลือก output mode ใด
 
 ### main.py — API layer
 
@@ -263,3 +299,5 @@ Toast auto-dismiss ใน component เอง → call `onDismiss` → parent re
 | ไม่มี zoom | SVG pan เท่านั้น | เพิ่ม `scale` state + CSS transform |
 | Single-process backend | uvicorn default | ใช้ `--workers N` (ต้องย้าย job store ออก) |
 | ไม่มี undo/redo | complex state | เพิ่ม history stack ด้วย `useReducer` |
+| rsyslog UDP ไม่มี ACK | UDP เป็น fire-and-forget | ใช้ TCP syslog หรือ TLS syslog แทน |
+| Victoria Logs ส่งทั้งหมดใน request เดียว | simple design | แบ่ง batch ถ้า event มาก (>10k lines) |

@@ -23,8 +23,12 @@
                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  FastAPI Backend (:8000)                                        │
-│  scenarios.py → simulate.py → per-source .log files            │
-│                             → ground_truth.json / .log         │
+│  scenarios.py → simulate.py                                     │
+│                    │                                            │
+│                    ├─ [file]          → per-source .log files   │
+│                    ├─ [rsyslog_udp]   → UDP syslog (RFC 5424)   │
+│                    └─ [victoria_logs] → HTTP NDJSON POST        │
+│                    (ground_truth.json / .log เสมอ)              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -127,10 +131,20 @@ npm run dev                      # เปิดที่ http://localhost:3000
 1. คลิก **▶ Run Simulation**
 2. เลือก fault scenario
 3. เปิด/ปิด "Mix baseline traffic"
-4. กำหนด output directory
+4. เลือก **Output Destination** (ดูรายละเอียดด้านล่าง)
 5. คลิก **Start Simulation**
 6. ดูผลลัพธ์: stats cards, attack schedule, และไฟล์ log
 7. คลิกไฟล์ log ใดก็ได้เพื่อ preview พร้อม color-coded labels
+
+#### Output Destination
+
+| ปุ่ม | คำอธิบาย | config field |
+|------|----------|-------------|
+| 📁 **File** | เขียนไฟล์ `.log` ต่อ node ลง local directory | Output Directory |
+| 📡 **rsyslog UDP** | ส่ง log เป็น RFC 5424 UDP packet ทุกบรรทัด | Host + Port (default `127.0.0.1:514`) |
+| 🏔 **Victoria Logs** | POST NDJSON batch ไปยัง `/insert/jsonline` | Ingest URL (default `http://localhost:9428/insert/jsonline`) |
+
+> **หมายเหตุ**: `ground_truth.log` และ `ground_truth.json` เขียนลง local เสมอทุก mode เพื่อแสดงสถิติใน UI
 
 ---
 
@@ -161,7 +175,9 @@ npm run dev                      # เปิดที่ http://localhost:3000
 
 ## Output files
 
-หลังจาก simulate เสร็จ จะมีไฟล์ใน output directory:
+ไฟล์ที่สร้างขึ้นขึ้นอยู่กับ Output Destination ที่เลือก:
+
+### Mode: File (default)
 
 ```
 /tmp/logsim2_output/
@@ -169,6 +185,17 @@ npm run dev                      # เปิดที่ http://localhost:3000
 ├── ground_truth.log           # LABEL|node_id|+delta_s|first_line
 └── ground_truth.json          # structured version สำหรับ machine consumption
 ```
+
+### Mode: rsyslog UDP / Victoria Logs
+
+```
+/tmp/logsim2_output/
+├── ground_truth.log           # เหมือนเดิม — เสมอ
+└── ground_truth.json          # เหมือนเดิม — เสมอ
+```
+
+per-source `.log` จะไม่ถูกเขียน — log ถูกส่งไปยัง remote endpoint แทน  
+UI แสดง banner "Delivered X lines to rsyslog/Victoria Logs" เมื่อสำเร็จ
 
 ### ground_truth.log format
 
@@ -204,6 +231,21 @@ SYMPTOM|lb1|+20.0s|haproxy[12345]: Server app_backend/app-01 is DOWN
 | `GET` | `/api/logs` | list ไฟล์ใน output directory |
 | `GET` | `/api/logs/{filename}` | ดู N บรรทัดสุดท้ายของไฟล์ |
 | `GET` | `/health` | health check |
+
+#### POST /api/simulate — request body
+
+```jsonc
+{
+  "topology":          { "netNodes": [], "netEdges": [], "svcNodes": [], "svcEdges": [] },
+  "scenario":          "mysql_cascade",
+  "mix_baseline":      true,
+  "output_dest":       "file",            // "file" | "rsyslog_udp" | "victoria_logs"
+  "output_dir":        "/tmp/logsim2_output",  // ใช้เมื่อ output_dest = "file"
+  "rsyslog_host":      "127.0.0.1",       // ใช้เมื่อ output_dest = "rsyslog_udp"
+  "rsyslog_port":      514,
+  "victoria_logs_url": "http://localhost:9428/insert/jsonline"  // victoria_logs
+}
+```
 
 ดูรายละเอียดได้ที่ http://localhost:8000/docs
 
