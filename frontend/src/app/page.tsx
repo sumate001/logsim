@@ -34,11 +34,11 @@ const DEFAULT: TopologyData = {
     { id: "ne8", source: "web2", target: "red1", protocol: "TCP",   port: 6379, critical: false, callRate: 300 },
   ],
   svcNodes: [
-    { id: "svc_lb",    label: "haproxy",  role: "lb",      tech: "haproxy", ip: "10.0.0.10", x: 340, y: 60  },
-    { id: "svc_api",   label: "api",      role: "service", tech: "python",  ip: "10.0.1.12", x: 340, y: 180 },
-    { id: "svc_auth",  label: "auth-svc", role: "service", tech: "nodejs",  ip: "10.0.1.13", x: 160, y: 300 },
-    { id: "svc_db",    label: "mysql",    role: "db",      tech: "mysql",   ip: "10.0.2.20", x: 260, y: 420 },
-    { id: "svc_cache", label: "redis",    role: "cache",   tech: "redis",   ip: "10.0.2.21", x: 460, y: 420 },
+    { id: "svc_lb",    label: "haproxy",  role: "lb",      tech: "haproxy", ip: "10.0.0.10", os: "", x: 340, y: 60  },
+    { id: "svc_api",   label: "api",      role: "service", tech: "python",  ip: "10.0.1.12", os: "", x: 340, y: 180 },
+    { id: "svc_auth",  label: "auth-svc", role: "service", tech: "nodejs",  ip: "10.0.1.13", os: "", x: 160, y: 300 },
+    { id: "svc_db",    label: "mysql",    role: "db",      tech: "mysql",   ip: "10.0.2.20", os: "", x: 260, y: 420 },
+    { id: "svc_cache", label: "redis",    role: "cache",   tech: "redis",   ip: "10.0.2.21", os: "", x: 460, y: 420 },
   ],
   svcEdges: [
     { id: "se1", source: "svc_lb",   target: "svc_api",   protocol: "HTTP", port: 8000, critical: true,  callRate: 490 },

@@ -17,11 +17,21 @@ interface JobResult {
     root_cause: number;
     propagation: number;
     symptom: number;
+    output_dest?: string;
+    sent_lines?: number | null;
   };
   files?: { name: string; size: number; path: string }[];
   attack_schedule?: { delta_sec: number; label: string; node_id: string; summary: string }[];
   error?: string;
 }
+
+type OutputDest = "file" | "rsyslog_udp" | "victoria_logs";
+
+const DEST_TABS: { key: OutputDest; label: string; hint: string }[] = [
+  { key: "file",          label: "📁  File",          hint: "Write .log files to a local directory" },
+  { key: "rsyslog_udp",   label: "📡  rsyslog UDP",    hint: "Stream via RFC 5424 syslog over UDP" },
+  { key: "victoria_logs", label: "🏔  Victoria Logs",  hint: "POST NDJSON to Victoria Logs HTTP API" },
+];
 
 const LABEL_COL: Record<string, string> = {
   ROOT_CAUSE:  "text-red-400",
@@ -47,11 +57,18 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
   const [scenarios, setScenarios] = useState<Record<string, ScenarioMeta>>({});
   const [scenario, setScenario]   = useState("mysql_cascade");
   const [mixBase, setMixBase]     = useState(true);
-  const [outputDir, setOutputDir] = useState("/tmp/logsim2_output");
-  const [jobId, setJobId]         = useState<string | null>(null);
-  const [job, setJob]             = useState<JobResult | null>(null);
-  const [running, setRunning]     = useState(false);
-  const [preview, setPreview]     = useState<string | null>(null);
+
+  // ── output destination state ────────────────────────────────────────────
+  const [outputDest,   setOutputDest]   = useState<OutputDest>("file");
+  const [outputDir,    setOutputDir]    = useState("/tmp/logsim2_output");
+  const [rsyslogHost,  setRsyslogHost]  = useState("127.0.0.1");
+  const [rsyslogPort,  setRsyslogPort]  = useState(514);
+  const [victoriaUrl,  setVictoriaUrl]  = useState("http://localhost:9428/insert/jsonline");
+
+  const [jobId,   setJobId]   = useState<string | null>(null);
+  const [job,     setJob]     = useState<JobResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Load scenario list
@@ -67,7 +84,7 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
     if (!jobId || !running) return;
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/jobs/${jobId}`);
+        const res  = await fetch(`/api/jobs/${jobId}`);
         const data: JobResult = await res.json();
         setJob(data);
         if (data.status === "completed" || data.status === "failed") {
@@ -95,8 +112,12 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
             svcEdges: topology.svcEdges,
           },
           scenario,
-          output_dir: outputDir,
-          mix_baseline: mixBase,
+          output_dir:        outputDir,
+          mix_baseline:      mixBase,
+          output_dest:       outputDest,
+          rsyslog_host:      rsyslogHost,
+          rsyslog_port:      rsyslogPort,
+          victoria_logs_url: victoriaUrl,
         }),
       });
       const { job_id } = await res.json();
@@ -105,14 +126,18 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
       setRunning(false);
       setJob({ status: "failed", progress: 0, message: String(e), error: String(e) });
     }
-  }, [topology, scenario, outputDir, mixBase]);
+  }, [topology, scenario, outputDir, mixBase, outputDest, rsyslogHost, rsyslogPort, victoriaUrl]);
 
   const fmtBytes = (b: number) =>
     b > 1_000_000 ? `${(b / 1e6).toFixed(1)} MB`
-    : b > 1000 ? `${(b / 1e3).toFixed(1)} KB`
-    : `${b} B`;
+    : b > 1000    ? `${(b / 1e3).toFixed(1)} KB`
+    :               `${b} B`;
 
   if (!open) return null;
+
+  const inputCls =
+    "w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 " +
+    "text-sm font-mono text-slate-100 focus:outline-none focus:border-blue-500";
 
   return (
     <>
@@ -132,7 +157,8 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          {/* Config ─────────────────────────────────────────────────────── */}
+
+          {/* ── Scenario ────────────────────────────────────────────────── */}
           <section className="space-y-3">
             <div>
               <label className="text-xs text-slate-400 block mb-1">Fault Scenario</label>
@@ -160,16 +186,72 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
               </button>
               <span className="text-sm text-slate-300">Mix baseline traffic</span>
             </div>
-
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">Output Directory</label>
-              <input value={outputDir} onChange={(e) => setOutputDir(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2
-                           text-sm font-mono text-slate-100 focus:outline-none focus:border-blue-500" />
-            </div>
           </section>
 
-          {/* Start button */}
+          {/* ── Output Destination ──────────────────────────────────────── */}
+          <section className="space-y-3">
+            <div>
+              <label className="text-xs text-slate-400 block mb-2">Output Destination</label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {DEST_TABS.map(({ key, label }) => (
+                  <button
+                    key={key}
+                    onClick={() => setOutputDest(key)}
+                    className={`py-2 px-1 rounded text-xs font-medium border transition-colors
+                      ${outputDest === key
+                        ? "bg-indigo-600 border-indigo-500 text-white"
+                        : "bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-200"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1.5">
+                {DEST_TABS.find((d) => d.key === outputDest)?.hint}
+              </p>
+            </div>
+
+            {/* File */}
+            {outputDest === "file" && (
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Output Directory</label>
+                <input value={outputDir} onChange={(e) => setOutputDir(e.target.value)}
+                  className={inputCls} />
+              </div>
+            )}
+
+            {/* rsyslog UDP */}
+            {outputDest === "rsyslog_udp" && (
+              <div className="grid grid-cols-[1fr_96px] gap-2">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Host</label>
+                  <input value={rsyslogHost}
+                    onChange={(e) => setRsyslogHost(e.target.value)}
+                    placeholder="127.0.0.1"
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Port</label>
+                  <input type="number" value={rsyslogPort}
+                    onChange={(e) => setRsyslogPort(Number(e.target.value))}
+                    className={inputCls} />
+                </div>
+              </div>
+            )}
+
+            {/* Victoria Logs */}
+            {outputDest === "victoria_logs" && (
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Ingest URL</label>
+                <input value={victoriaUrl}
+                  onChange={(e) => setVictoriaUrl(e.target.value)}
+                  placeholder="http://localhost:9428/insert/jsonline"
+                  className={inputCls} />
+              </div>
+            )}
+          </section>
+
+          {/* ── Start button ────────────────────────────────────────────── */}
           <button onClick={startSim} disabled={running}
             className="w-full py-2.5 rounded-lg font-semibold text-sm transition-colors
                        bg-blue-600 hover:bg-blue-500 disabled:opacity-50
@@ -177,7 +259,7 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
             {running ? "Simulating…" : "▶  Start Simulation"}
           </button>
 
-          {/* Progress */}
+          {/* ── Progress ────────────────────────────────────────────────── */}
           {job && (
             <div className="space-y-2">
               <div className="flex justify-between text-xs text-slate-400">
@@ -196,7 +278,26 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
             </div>
           )}
 
-          {/* Stats cards */}
+          {/* ── Remote-delivery banner ───────────────────────────────────── */}
+          {job?.status === "completed" && job.stats?.sent_lines != null && (
+            <div className="flex items-center gap-2 bg-indigo-950/60 border border-indigo-800
+                            rounded-lg px-3 py-2.5">
+              <span className="text-indigo-300 text-lg">
+                {job.stats.output_dest === "rsyslog_udp" ? "📡" : "🏔"}
+              </span>
+              <div>
+                <p className="text-xs font-semibold text-indigo-200">Delivery successful</p>
+                <p className="text-[11px] text-indigo-400">
+                  {job.stats.sent_lines.toLocaleString()} lines sent
+                  {job.stats.output_dest === "rsyslog_udp"
+                    ? ` → rsyslog udp://${rsyslogHost}:${rsyslogPort}`
+                    : ` → ${victoriaUrl}`}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* ── Stats cards ─────────────────────────────────────────────── */}
           {job?.status === "completed" && job.stats && (
             <section>
               <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
@@ -214,9 +315,9 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
               </div>
               <div className="mt-2 grid grid-cols-3 gap-2">
                 {[
-                  { key: "root_cause", label: "Root Cause", color: "text-red-400" },
+                  { key: "root_cause",  label: "Root Cause",  color: "text-red-400"    },
                   { key: "propagation", label: "Propagation", color: "text-yellow-400" },
-                  { key: "symptom", label: "Symptom", color: "text-cyan-400" },
+                  { key: "symptom",     label: "Symptom",     color: "text-cyan-400"   },
                 ].map(({ key, label, color }) => (
                   <div key={key} className="bg-slate-900 rounded-lg p-2 border border-slate-800 text-center">
                     <p className="text-[9px] text-slate-500">{label}</p>
@@ -229,7 +330,7 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
             </section>
           )}
 
-          {/* Attack schedule */}
+          {/* ── Attack schedule ─────────────────────────────────────────── */}
           {job?.attack_schedule && job.attack_schedule.length > 0 && (
             <section>
               <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
@@ -241,7 +342,7 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
                                           bg-slate-900 rounded px-2 py-1.5 border border-slate-800">
                     <span className="text-slate-600 w-12 shrink-0">+{ev.delta_sec.toFixed(1)}s</span>
                     <span className={`w-20 shrink-0 font-semibold ${LABEL_COL[ev.label] ?? "text-slate-400"}`}>
-                      {ev.label.replace("_", " ")}
+                      {ev.label.replace("_", " ")}
                     </span>
                     <span className="text-slate-500 truncate">{ev.summary}</span>
                   </div>
@@ -250,7 +351,7 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
             </section>
           )}
 
-          {/* File list */}
+          {/* ── File list ───────────────────────────────────────────────── */}
           {job?.files && job.files.length > 0 && (
             <section>
               <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
@@ -258,7 +359,8 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
               </h3>
               <div className="space-y-1">
                 {job.files.map((f) => (
-                  <button key={f.name} onClick={() => setPreview(preview === f.name ? null : f.name)}
+                  <button key={f.name}
+                    onClick={() => setPreview(preview === f.name ? null : f.name)}
                     className={`w-full flex justify-between items-center px-3 py-2 rounded text-xs
                                 border transition-colors text-left
                       ${preview === f.name

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from scenarios import SCENARIOS
-from simulate import SimConfig, create_job, get_job, run_simulation
+from simulate import OutputDest, SimConfig, create_job, get_job, run_simulation
 
 app = FastAPI(title="LogSim2 API", version="1.0.0")
 
@@ -29,6 +29,11 @@ class SimulateRequest(BaseModel):
     mix_baseline: bool = True
     baseline_duration: float = 30.0
     seed: Optional[int] = None
+    # ── output destination ──────────────────────────────
+    output_dest: str = "file"          # "file" | "rsyslog_udp" | "victoria_logs"
+    rsyslog_host: str = "127.0.0.1"
+    rsyslog_port: int = 514
+    victoria_logs_url: str = "http://localhost:9428/insert/jsonline"
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +51,10 @@ def list_scenarios():
 @app.post("/api/simulate")
 async def start_simulation(req: SimulateRequest, bg: BackgroundTasks):
     job_id = create_job()
+    try:
+        dest = OutputDest(req.output_dest)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid output_dest: {req.output_dest!r}")
     config = SimConfig(
         topology=req.topology,
         scenario=req.scenario,
@@ -53,6 +62,10 @@ async def start_simulation(req: SimulateRequest, bg: BackgroundTasks):
         mix_baseline=req.mix_baseline,
         baseline_duration=req.baseline_duration,
         seed=req.seed,
+        output_dest=dest,
+        rsyslog_host=req.rsyslog_host,
+        rsyslog_port=req.rsyslog_port,
+        victoria_logs_url=req.victoria_logs_url,
     )
     bg.add_task(run_simulation, job_id, config)
     return {"job_id": job_id}
