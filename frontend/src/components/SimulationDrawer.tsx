@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { TopologyData } from "@/types/topology";
 import LogPreview from "./LogPreview";
+import { GodEyeConfig } from "./GodEyePanel";
 
 interface ScenarioMeta { name: string; description: string; }
 
@@ -51,9 +52,18 @@ interface Props {
   open: boolean;
   onClose: () => void;
   topology: TopologyData;
+  godeyeEnabled?: boolean;
+  godeyeConfig?: GodEyeConfig;
+  onGodeyeJobComplete?: (jobId: string, assetCount: number) => void;
+  onCleanupDone?: () => void;
 }
 
-export default function SimulationDrawer({ open, onClose, topology }: Props) {
+export default function SimulationDrawer({
+  open, onClose, topology,
+  godeyeEnabled = false,
+  godeyeConfig,
+  onGodeyeJobComplete,
+}: Props) {
   const [scenarios, setScenarios] = useState<Record<string, ScenarioMeta>>({});
   const [scenario, setScenario]   = useState("mysql_cascade");
   const [mixBase, setMixBase]     = useState(true);
@@ -90,6 +100,12 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
         if (data.status === "completed" || data.status === "failed") {
           setRunning(false);
           if (pollRef.current) clearInterval(pollRef.current);
+          // Notify parent of GodEye job completion (for cleanup tracking)
+          if (data.status === "completed" && godeyeEnabled && jobId) {
+            const assetCount =
+              (topology.netNodes.length + topology.svcNodes.length) || 0;
+            onGodeyeJobComplete?.(jobId, assetCount);
+          }
         }
       } catch {}
     }, 800);
@@ -100,6 +116,10 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
     setJob(null);
     setPreview(null);
     setRunning(true);
+
+    const dest        = godeyeEnabled ? "godeye" : outputDest;
+    const ge          = godeyeConfig;
+
     try {
       const res = await fetch("/api/simulate", {
         method: "POST",
@@ -114,10 +134,21 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
           scenario,
           output_dir:        outputDir,
           mix_baseline:      mixBase,
-          output_dest:       outputDest,
+          output_dest:       dest,
           rsyslog_host:      rsyslogHost,
           rsyslog_port:      rsyslogPort,
           victoria_logs_url: victoriaUrl,
+          // GodEye fields
+          ...(godeyeEnabled && ge ? {
+            godeye_iam_url:          ge.iamUrl,
+            godeye_email:            ge.email,
+            godeye_password:         ge.password,
+            godeye_inventory_url:    ge.inventoryUrl,
+            godeye_vminsert_url:     ge.vminsertUrl,
+            godeye_otel_url:         ge.otelUrl,
+            godeye_tenant_id:        ge.tenantId,
+            godeye_baseline_minutes: ge.baselineMinutes,
+          } : {}),
         }),
       });
       const { job_id } = await res.json();
@@ -126,7 +157,8 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
       setRunning(false);
       setJob({ status: "failed", progress: 0, message: String(e), error: String(e) });
     }
-  }, [topology, scenario, outputDir, mixBase, outputDest, rsyslogHost, rsyslogPort, victoriaUrl]);
+  }, [topology, scenario, outputDir, mixBase, outputDest, rsyslogHost, rsyslogPort,
+      victoriaUrl, godeyeEnabled, godeyeConfig]);
 
   const fmtBytes = (b: number) =>
     b > 1_000_000 ? `${(b / 1e6).toFixed(1)} MB`
@@ -188,8 +220,22 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
             </div>
           </section>
 
+          {/* ── GodEye mode banner ──────────────────────────────────────── */}
+          {godeyeEnabled && (
+            <div className="flex items-center gap-2 bg-green-950/40 border border-green-800
+                            rounded-lg px-3 py-2">
+              <span className="text-green-400 text-base">👁</span>
+              <div>
+                <p className="text-xs font-semibold text-green-300">GodEye Mode Active</p>
+                <p className="text-[11px] text-green-600">
+                  Logs → OTLP :4318 · Metrics → vminsert :8480 · Hosts registered in api-inventory
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* ── Output Destination ──────────────────────────────────────── */}
-          <section className="space-y-3">
+          <section className={`space-y-3 ${godeyeEnabled ? "opacity-40 pointer-events-none" : ""}`}>
             <div>
               <label className="text-xs text-slate-400 block mb-2">Output Destination</label>
               <div className="grid grid-cols-3 gap-1.5">
@@ -253,10 +299,16 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
 
           {/* ── Start button ────────────────────────────────────────────── */}
           <button onClick={startSim} disabled={running}
-            className="w-full py-2.5 rounded-lg font-semibold text-sm transition-colors
-                       bg-blue-600 hover:bg-blue-500 disabled:opacity-50
-                       disabled:cursor-not-allowed text-white">
-            {running ? "Simulating…" : "▶  Start Simulation"}
+            className={`w-full py-2.5 rounded-lg font-semibold text-sm transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed text-white
+                       ${godeyeEnabled
+                         ? "bg-green-700 hover:bg-green-600"
+                         : "bg-blue-600 hover:bg-blue-500"}`}>
+            {running
+              ? "Simulating…"
+              : godeyeEnabled
+                ? "👁  Run GodEye Simulation"
+                : "▶  Start Simulation"}
           </button>
 
           {/* ── Progress ────────────────────────────────────────────────── */}
@@ -280,18 +332,30 @@ export default function SimulationDrawer({ open, onClose, topology }: Props) {
 
           {/* ── Remote-delivery banner ───────────────────────────────────── */}
           {job?.status === "completed" && job.stats?.sent_lines != null && (
-            <div className="flex items-center gap-2 bg-indigo-950/60 border border-indigo-800
-                            rounded-lg px-3 py-2.5">
-              <span className="text-indigo-300 text-lg">
-                {job.stats.output_dest === "rsyslog_udp" ? "📡" : "🏔"}
+            <div className={`flex items-center gap-2 rounded-lg px-3 py-2.5 border
+              ${job.stats.output_dest === "godeye"
+                ? "bg-green-950/60 border-green-800"
+                : "bg-indigo-950/60 border-indigo-800"}`}>
+              <span className="text-lg">
+                {job.stats.output_dest === "godeye"       ? "👁"
+                 : job.stats.output_dest === "rsyslog_udp"? "📡"
+                 :                                          "🏔"}
               </span>
               <div>
-                <p className="text-xs font-semibold text-indigo-200">Delivery successful</p>
-                <p className="text-[11px] text-indigo-400">
-                  {job.stats.sent_lines.toLocaleString()} lines sent
-                  {job.stats.output_dest === "rsyslog_udp"
-                    ? ` → rsyslog udp://${rsyslogHost}:${rsyslogPort}`
-                    : ` → ${victoriaUrl}`}
+                <p className={`text-xs font-semibold
+                  ${job.stats.output_dest === "godeye" ? "text-green-300" : "text-indigo-200"}`}>
+                  {job.stats.output_dest === "godeye"
+                    ? "GodEye delivery complete — waiting for ml-sweep (≤15 min)"
+                    : "Delivery successful"}
+                </p>
+                <p className={`text-[11px]
+                  ${job.stats.output_dest === "godeye" ? "text-green-600" : "text-indigo-400"}`}>
+                  {job.stats.sent_lines.toLocaleString()} log records sent
+                  {job.stats.output_dest === "godeye"
+                    ? ` via OTLP → ${godeyeConfig?.otelUrl ?? ""}`
+                    : job.stats.output_dest === "rsyslog_udp"
+                      ? ` → rsyslog udp://${rsyslogHost}:${rsyslogPort}`
+                      : ` → ${victoriaUrl}`}
                 </p>
               </div>
             </div>

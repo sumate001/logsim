@@ -4,6 +4,7 @@ import TopologyCanvas from "@/components/TopologyCanvas";
 import NodePanel from "@/components/NodePanel";
 import SimulationDrawer from "@/components/SimulationDrawer";
 import Toast from "@/components/Toast";
+import GodEyePanel, { GodEyeConfig, DEFAULT_GODEYE_CONFIG } from "@/components/GodEyePanel";
 import {
   TopologyData, TopologyNode, TopologyEdge,
   NodeRole, NodeTech,
@@ -160,12 +161,17 @@ export default function Home() {
   const [netSel, setNetSel]     = useState<Selection>(null);
   const [svcSel, setSvcSel]     = useState<Selection>(null);
   const [mode, setMode]         = useState<CanvasMode>("select");
-  const [drawerOpen, setDrawer] = useState(false);
-  const [toasts, setToasts]     = useState<ToastItem[]>([]);
-  const [netFit, setNetFit]     = useState(0);
-  const [svcFit, setSvcFit]     = useState(0);
-  const fileInputRef            = useRef<HTMLInputElement>(null);
-  const toastId                 = useRef(0);
+  const [drawerOpen, setDrawer]       = useState(false);
+  const [toasts, setToasts]           = useState<ToastItem[]>([]);
+  const [netFit, setNetFit]           = useState(0);
+  const [svcFit, setSvcFit]           = useState(0);
+  const fileInputRef                  = useRef<HTMLInputElement>(null);
+  const toastId                       = useRef(0);
+  // ── GodEye state ────────────────────────────────────────────────────────
+  const [godeyeEnabled, setGodeyeEnabled] = useState(false);
+  const [godeyeConfig, setGodeyeConfig]   = useState<GodEyeConfig>(DEFAULT_GODEYE_CONFIG);
+  const [godeyeLastJob, setGodeyeLastJob] = useState<string | null>(null);
+  const [godeyePending, setGodeyePending] = useState(0);
 
   // Active-tab shortcuts
   const isNet    = tab === "network";
@@ -337,6 +343,16 @@ export default function Home() {
         </button>
       </header>
 
+      {/* ── GodEye Panel ─────────────────────────────────────────────────── */}
+      <GodEyePanel
+        enabled={godeyeEnabled}
+        onToggle={setGodeyeEnabled}
+        config={godeyeConfig}
+        onChange={setGodeyeConfig}
+        pendingCleanup={godeyePending}
+        lastJobId={godeyeLastJob}
+      />
+
       {/* ── Canvas + Right Panel ──────────────────────────────────────────── */}
       <div className="flex flex-1 min-h-0">
         {/* Canvas area — two overlaid instances, inactive gets pointer-events-none */}
@@ -456,6 +472,13 @@ export default function Home() {
         open={drawerOpen}
         onClose={() => setDrawer(false)}
         topology={topo}
+        godeyeEnabled={godeyeEnabled}
+        godeyeConfig={godeyeConfig}
+        onGodeyeJobComplete={(jobId, assetCount) => {
+          setGodeyeLastJob(jobId);
+          setGodeyePending(assetCount);
+        }}
+        onCleanupDone={() => setGodeyePending(0)}
       />
 
       {/* ── Toast stack ───────────────────────────────────────────────────── */}

@@ -25,10 +25,23 @@ class OutputDest(str, enum.Enum):
     FILE          = "file"
     RSYSLOG_UDP   = "rsyslog_udp"
     VICTORIA_LOGS = "victoria_logs"
+    GODEYE        = "godeye"
 
 # ---------------------------------------------------------------------------
 # Config + Job state
 # ---------------------------------------------------------------------------
+
+@dataclass
+class GodEyeConfig:
+    iam_url: str        = "http://localhost:3070"
+    email: str          = ""
+    password: str       = ""
+    inventory_url: str  = "http://localhost:3010"
+    vminsert_url: str   = "http://localhost:8480"
+    otel_url: str       = "http://localhost:4318"
+    tenant_id: str      = "internal"
+    baseline_minutes: int = 30
+
 
 @dataclass
 class SimConfig:
@@ -43,6 +56,8 @@ class SimConfig:
     rsyslog_host: str        = "127.0.0.1"
     rsyslog_port: int        = 514
     victoria_logs_url: str   = "http://localhost:9428/insert/jsonline"
+    # ── GodEye integration ──────────────────────────────
+    godeye: Optional[GodEyeConfig] = None
 
 
 @dataclass
@@ -368,6 +383,134 @@ def _write_logs(
     _write_ground_truth(output_dir, events)
 
 # ---------------------------------------------------------------------------
+# GodEye cleanup registry  {job_id: [(inventory_url, jwt, asset_id), ...]}
+# ---------------------------------------------------------------------------
+
+_godeye_cleanup: Dict[str, list] = {}
+
+
+def get_godeye_cleanup(job_id: str) -> list:
+    return _godeye_cleanup.get(job_id, [])
+
+
+def pop_godeye_cleanup(job_id: str) -> list:
+    return _godeye_cleanup.pop(job_id, [])
+
+
+# ---------------------------------------------------------------------------
+# GodEye simulation flow
+# ---------------------------------------------------------------------------
+
+async def _run_godeye(
+    job: "JobStatus",
+    config: "SimConfig",
+    topo: Topology,
+    fault_events: List[Tuple[float, str, str, str]],
+    all_events: List[Tuple[float, str, str, str]],
+) -> int:
+    """Full GodEye pipeline. Returns total log records sent."""
+    from godeye import client as ge_client
+    from godeye import otlp as ge_otlp
+    from godeye import metrics as ge_metrics
+
+    ge = config.godeye
+    if ge is None:
+        raise ValueError("GodEye config missing")
+
+    all_nodes: Dict[str, Any] = {n.id: n for n in topo.net_nodes}
+    all_nodes.update({n.id: n for n in topo.svc_nodes})
+
+    # ── Step 1: Login ────────────────────────────────────────────────────────
+    job.progress = 0.42
+    job.message = "GodEye: logging in to api-iam…"
+    await asyncio.sleep(0)
+
+    jwt = ge_client.login(ge.iam_url, ge.email, ge.password)
+
+    # ── Step 2: Register fake hosts in api-inventory ─────────────────────────
+    job.progress = 0.50
+    job.message = "GodEye: registering simulated hosts in api-inventory…"
+    await asyncio.sleep(0)
+
+    # Deduplicate by hostname (label)
+    seen: Dict[str, str] = {}   # hostname → asset_id
+    cleanup_entries = []
+
+    for node in list(topo.net_nodes) + list(topo.svc_nodes):
+        hostname = (node.label or node.id).replace(" ", "-").lower()
+        if hostname in seen:
+            continue
+        tech_val = node.tech.value
+        asset_class = ge_metrics.TECH_TO_ASSET_CLASS.get(tech_val, "linux")
+        asset_id = ge_client.register_asset(
+            ge.inventory_url, jwt,
+            name=hostname,
+            asset_class=asset_class,
+            asset_type="server",
+            ip=getattr(node, "ip", ""),
+            tenant_id=ge.tenant_id,
+        )
+        seen[hostname] = asset_id
+        cleanup_entries.append((ge.inventory_url, jwt, asset_id))
+
+    _godeye_cleanup[job.job_id] = cleanup_entries
+
+    # ── Step 3: Inject baseline metrics (past 30 min) ────────────────────────
+    job.progress = 0.58
+    job.message = f"GodEye: injecting baseline metrics ({ge.baseline_minutes} min history)…"
+    await asyncio.sleep(0)
+
+    for node in list(topo.net_nodes) + list(topo.svc_nodes):
+        hostname = (node.label or node.id).replace(" ", "-").lower()
+        asset_id = seen.get(hostname)
+        if not asset_id:
+            continue
+        lines = ge_metrics.build_baseline_lines(
+            asset_id=asset_id,
+            tenant_id=ge.tenant_id,
+            tech=node.tech.value,
+            baseline_minutes=ge.baseline_minutes,
+        )
+        ge_metrics.inject_metrics(ge.vminsert_url, lines)
+
+    # ── Step 4: Inject fault metrics ─────────────────────────────────────────
+    job.progress = 0.66
+    job.message = "GodEye: injecting fault metrics (spike)…"
+    await asyncio.sleep(0)
+
+    # Find ROOT_CAUSE nodes
+    root_cause_node_ids = {nid for _, _, lbl, nid in fault_events if lbl == "ROOT_CAUSE"}
+
+    for node in list(topo.net_nodes) + list(topo.svc_nodes):
+        if node.id not in root_cause_node_ids:
+            continue
+        hostname = (node.label or node.id).replace(" ", "-").lower()
+        asset_id = seen.get(hostname)
+        if not asset_id:
+            continue
+        lines = ge_metrics.build_fault_lines(
+            asset_id=asset_id,
+            tenant_id=ge.tenant_id,
+            tech=node.tech.value,
+        )
+        ge_metrics.inject_metrics(ge.vminsert_url, lines)
+
+    # ── Step 5: Send logs via OTLP ───────────────────────────────────────────
+    job.progress = 0.78
+    job.message = "GodEye: sending logs via OTLP to otel-collector…"
+    await asyncio.sleep(0)
+
+    sent, err = ge_otlp.send_logs(
+        all_events, all_nodes, ge.otel_url, ge.tenant_id
+    )
+    if err:
+        raise RuntimeError(f"OTLP send failed: {err}")
+
+    _write_ground_truth(config.output_dir, all_events)
+    return sent
+
+
+# ---------------------------------------------------------------------------
 # Simulation runner (async background task)
 # ---------------------------------------------------------------------------
 
@@ -408,7 +551,10 @@ async def run_simulation(job_id: str, config: SimConfig) -> None:
         # ── Route to selected output destination ─────────────────────────
         dest = config.output_dest
 
-        if dest == OutputDest.RSYSLOG_UDP:
+        if dest == OutputDest.GODEYE:
+            sent = await _run_godeye(job, config, topo, fault_events, all_events)
+
+        elif dest == OutputDest.RSYSLOG_UDP:
             job.progress = 0.65
             job.message = (
                 f"Sending to rsyslog udp://{config.rsyslog_host}:{config.rsyslog_port}…"
@@ -471,10 +617,12 @@ async def run_simulation(job_id: str, config: SimConfig) -> None:
                         "path": str(f),
                     })
 
+        ge = config.godeye
         dest_label = {
             OutputDest.FILE:          "file",
             OutputDest.RSYSLOG_UDP:   f"rsyslog udp://{config.rsyslog_host}:{config.rsyslog_port}",
             OutputDest.VICTORIA_LOGS: config.victoria_logs_url,
+            OutputDest.GODEYE:        ge.otel_url if ge else "godeye",
         }.get(dest, "file")
 
         job.status = "completed"

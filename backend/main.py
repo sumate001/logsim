@@ -6,7 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from scenarios import SCENARIOS
-from simulate import OutputDest, SimConfig, create_job, get_job, run_simulation
+from simulate import (
+    OutputDest, SimConfig, GodEyeConfig,
+    create_job, get_job, run_simulation,
+    get_godeye_cleanup, pop_godeye_cleanup,
+)
+from godeye import client as ge_client
 
 app = FastAPI(title="LogSim2 API", version="1.0.0")
 
@@ -30,10 +35,19 @@ class SimulateRequest(BaseModel):
     baseline_duration: float = 30.0
     seed: Optional[int] = None
     # ── output destination ──────────────────────────────
-    output_dest: str = "file"          # "file" | "rsyslog_udp" | "victoria_logs"
+    output_dest: str = "file"   # "file"|"rsyslog_udp"|"victoria_logs"|"godeye"
     rsyslog_host: str = "127.0.0.1"
     rsyslog_port: int = 514
     victoria_logs_url: str = "http://localhost:9428/insert/jsonline"
+    # ── GodEye integration ──────────────────────────────
+    godeye_iam_url: str       = "http://localhost:3070"
+    godeye_email: str         = ""
+    godeye_password: str      = ""
+    godeye_inventory_url: str = "http://localhost:3010"
+    godeye_vminsert_url: str  = "http://localhost:8480"
+    godeye_otel_url: str      = "http://localhost:4318"
+    godeye_tenant_id: str     = "internal"
+    godeye_baseline_minutes: int = 30
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +69,21 @@ async def start_simulation(req: SimulateRequest, bg: BackgroundTasks):
         dest = OutputDest(req.output_dest)
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid output_dest: {req.output_dest!r}")
+    godeye_cfg = None
+    if dest == OutputDest.GODEYE:
+        if not req.godeye_email or not req.godeye_password:
+            raise HTTPException(status_code=422, detail="GodEye email and password are required")
+        godeye_cfg = GodEyeConfig(
+            iam_url=req.godeye_iam_url,
+            email=req.godeye_email,
+            password=req.godeye_password,
+            inventory_url=req.godeye_inventory_url,
+            vminsert_url=req.godeye_vminsert_url,
+            otel_url=req.godeye_otel_url,
+            tenant_id=req.godeye_tenant_id,
+            baseline_minutes=req.godeye_baseline_minutes,
+        )
+
     config = SimConfig(
         topology=req.topology,
         scenario=req.scenario,
@@ -66,6 +95,7 @@ async def start_simulation(req: SimulateRequest, bg: BackgroundTasks):
         rsyslog_host=req.rsyslog_host,
         rsyslog_port=req.rsyslog_port,
         victoria_logs_url=req.victoria_logs_url,
+        godeye=godeye_cfg,
     )
     bg.add_task(run_simulation, job_id, config)
     return {"job_id": job_id}
@@ -116,6 +146,65 @@ def get_log(
         "total_lines": len(lines),
         "lines": lines[-n:],
     }
+
+
+@app.get("/api/godeye/check")
+def godeye_check(
+    iam_url: str      = "http://localhost:3070",
+    inventory_url: str = "http://localhost:3010",
+    vminsert_url: str  = "http://localhost:8480",
+    otel_url: str      = "http://localhost:4318",
+):
+    """Quick reachability check for all 3 GodEye endpoints."""
+    return {
+        "iam":       ge_client.check_endpoint(iam_url,       "/health"),
+        "inventory": ge_client.check_endpoint(inventory_url, "/health"),
+        "vminsert":  ge_client.check_endpoint(vminsert_url,  "/health"),
+        "otel":      ge_client.check_endpoint(otel_url,      "/"),
+    }
+
+
+class CleanupRequest(BaseModel):
+    job_id: str
+    iam_url: str      = "http://localhost:3070"
+    email: str        = ""
+    password: str     = ""
+    inventory_url: str = "http://localhost:3010"
+
+
+@app.post("/api/godeye/cleanup")
+def godeye_cleanup(req: CleanupRequest):
+    """Delete all fake assets registered during a simulation job."""
+    entries = pop_godeye_cleanup(req.job_id)
+    if not entries:
+        return {"deleted": 0, "message": "No registered assets found for this job"}
+
+    # Re-login in case original JWT expired
+    try:
+        jwt = ge_client.login(req.iam_url, req.email, req.password)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Login failed: {exc}")
+
+    deleted, errors = 0, []
+    for inventory_url, _old_jwt, asset_id in entries:
+        try:
+            ge_client.delete_asset(inventory_url, jwt, asset_id)
+            deleted += 1
+        except Exception as exc:
+            errors.append(f"{asset_id}: {exc}")
+
+    return {
+        "deleted": deleted,
+        "errors": errors,
+        "message": f"Deleted {deleted} asset(s)",
+    }
+
+
+@app.get("/api/godeye/pending-cleanup")
+def godeye_pending(job_id: str):
+    """Return how many assets are pending cleanup for a job."""
+    entries = get_godeye_cleanup(job_id)
+    return {"job_id": job_id, "pending": len(entries)}
 
 
 @app.get("/health")
