@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -210,3 +211,62 @@ def godeye_pending(job_id: str):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/update")
+def update_from_github():
+    """Pull latest code from GitHub and restart services if on server."""
+    repo_dir = Path(__file__).parent.parent  # logsim2/
+
+    # ── 1. git pull ──────────────────────────────────────────────────────────
+    try:
+        pull = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            cwd=str(repo_dir),
+            capture_output=True, text=True, timeout=60,
+        )
+        pull_output = pull.stdout.strip() or pull.stderr.strip()
+        already_up_to_date = "Already up to date" in pull_output
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"git pull failed: {e}")
+
+    # ── 2. On server: rebuild frontend + restart services ────────────────────
+    service_file = Path("/etc/systemd/system/logsim2-frontend.service")
+    restarted = False
+    build_output = ""
+
+    if service_file.exists() and not already_up_to_date:
+        try:
+            # rebuild Next.js
+            build = subprocess.run(
+                ["npm", "run", "build"],
+                cwd=str(repo_dir / "frontend"),
+                capture_output=True, text=True, timeout=300,
+            )
+            build_output = "build ok" if build.returncode == 0 else build.stderr[-500:]
+
+            # restart both services
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "logsim2-frontend", "logsim2-backend"],
+                capture_output=True, timeout=30,
+            )
+            restarted = True
+        except Exception as e:
+            build_output = f"restart error: {e}"
+
+    # ── 3. Get current commit ────────────────────────────────────────────────
+    try:
+        rev = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_dir), capture_output=True, text=True,
+        )
+        commit = rev.stdout.strip()
+    except Exception:
+        commit = "unknown"
+
+    return {
+        "pull":      pull_output,
+        "commit":    commit,
+        "restarted": restarted,
+        "build":     build_output or None,
+    }

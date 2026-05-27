@@ -276,6 +276,37 @@ export default function Home() {
     reader.readAsText(file);
   }, [pushToast]);
 
+  // ── Update from GitHub ──────────────────────────────────────────────────
+  const [updating, setUpdating] = useState(false);
+
+  const updateFromGithub = useCallback(async () => {
+    setUpdating(true);
+    try {
+      const res  = await fetch("/api/update", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "Update failed");
+
+      const alreadyLatest = data.pull?.includes("Already up to date");
+      pushToast({
+        type: "success",
+        message: alreadyLatest ? "Already up to date" : `Updated to ${data.commit}`,
+        subtext: alreadyLatest
+          ? `commit ${data.commit}`
+          : data.restarted
+            ? `${data.pull} · services restarted`
+            : `${data.pull} · reload page to apply`,
+      });
+    } catch (err) {
+      pushToast({
+        type: "error",
+        message: "Update failed",
+        subtext: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setUpdating(false);
+    }
+  }, [pushToast]);
+
   // ── Tab switch resets edge-drawing mode ────────────────────────────────
   const switchTab = (t: Tab) => {
     setTab(t);
@@ -340,6 +371,26 @@ export default function Home() {
           }`}
         >
           {mode === "add-edge" ? "⬡ Drawing Edge…" : "⬡ Add Edge"}
+        </button>
+
+        <div className="w-px h-5 bg-slate-700" />
+
+        {/* Update from GitHub */}
+        <button
+          onClick={updateFromGithub}
+          disabled={updating}
+          title="Pull latest code from GitHub"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium
+                     border border-slate-700 bg-slate-800 text-slate-300
+                     hover:border-slate-500 hover:text-slate-100
+                     disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {updating ? (
+            <span className="animate-spin">⟳</span>
+          ) : (
+            <span>⬆</span>
+          )}
+          {updating ? "Updating…" : "Update"}
         </button>
       </header>
 
