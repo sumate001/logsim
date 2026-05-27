@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from scenarios import SCENARIOS
 from simulate import (
     OutputDest, SimConfig, GodEyeConfig,
-    create_job, get_job, run_simulation,
+    create_job, get_job, run_simulation, stop_job,
     get_godeye_cleanup, pop_godeye_cleanup,
 )
 from godeye import client as ge_client
@@ -49,6 +49,8 @@ class SimulateRequest(BaseModel):
     godeye_otel_url: str      = "http://localhost:4318"
     godeye_tenant_id: str     = "internal"
     godeye_baseline_minutes: int = 30
+    # ── Streaming ──────────────────────────────────────
+    total_duration_minutes: float = 0  # 0 = one-shot
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +99,19 @@ async def start_simulation(req: SimulateRequest, bg: BackgroundTasks):
         rsyslog_port=req.rsyslog_port,
         victoria_logs_url=req.victoria_logs_url,
         godeye=godeye_cfg,
+        total_duration_minutes=req.total_duration_minutes,
     )
     bg.add_task(run_simulation, job_id, config)
     return {"job_id": job_id}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+def stop_simulation(job_id: str):
+    """Request a streaming simulation to stop gracefully."""
+    ok = stop_job(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, "message": "Stop requested"}
 
 
 @app.get("/api/jobs/{job_id}")

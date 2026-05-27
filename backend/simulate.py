@@ -58,6 +58,8 @@ class SimConfig:
     victoria_logs_url: str   = "http://localhost:9428/insert/jsonline"
     # ── GodEye integration ──────────────────────────────
     godeye: Optional[GodEyeConfig] = None
+    # ── Streaming mode ───────────────────────────────────
+    total_duration_minutes: float = 0  # 0 = one-shot
 
 
 @dataclass
@@ -73,6 +75,15 @@ class JobStatus:
 
 
 _jobs: Dict[str, JobStatus] = {}
+_stop_requested: set = set()   # job_ids that should stop streaming
+
+
+def stop_job(job_id: str) -> bool:
+    """Request a streaming job to stop gracefully."""
+    if job_id in _jobs:
+        _stop_requested.add(job_id)
+        return True
+    return False
 
 # ---------------------------------------------------------------------------
 # Topology parsing
@@ -514,6 +525,136 @@ async def _run_godeye(
 # Simulation runner (async background task)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Single-event send helpers (used by streaming loop)
+# ---------------------------------------------------------------------------
+
+def _build_syslog_packets(
+    line: str, label: str, node_id: str,
+    topo: "Topology", base_ts: datetime, delta: float,
+) -> List[bytes]:
+    """Return list of RFC-5424 UDP packet bytes for one event."""
+    all_nodes = {n.id: n for n in topo.net_nodes}
+    all_nodes.update({n.id: n for n in topo.svc_nodes})
+    _SEV = {"ROOT_CAUSE": 3, "PROPAGATION": 4, "SYMPTOM": 5, "NORMAL": 6}
+
+    node   = all_nodes.get(node_id)
+    host_f = ((node.label if node else node_id) or "logsim2").replace(" ", "_")
+    app_f  = (node.tech.value if node else "generic")
+    pri    = (1 * 8) + _SEV.get(label, 6)
+    ts_iso = (base_ts + timedelta(seconds=delta)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    pkts = []
+    for sub in line.split("\n"):
+        sub = sub.strip()
+        if not sub:
+            continue
+        pkt = f"<{pri}>1 {ts_iso} {host_f} {app_f} - {label} - {sub}"
+        pkts.append(pkt.encode("utf-8", errors="replace")[:65000])
+    return pkts
+
+
+async def _stream_loop(
+    job_id: str,
+    job: JobStatus,
+    config: "SimConfig",
+    topo: "Topology",
+) -> Tuple[int, int]:
+    """Stream logs in real time, looping baseline→fault until duration expires.
+    Returns (total_lines_sent, cycles_completed).
+    """
+    total_secs = config.total_duration_minutes * 60.0
+    started    = time.monotonic()
+    cycle      = 0
+    total_sent = 0
+
+    # UDP socket (kept open for the whole stream)
+    sock = None
+    if config.output_dest == OutputDest.RSYSLOG_UDP:
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        sock.settimeout(2.0)
+
+    try:
+        while True:
+            elapsed = time.monotonic() - started
+            if elapsed >= total_secs:
+                break
+            if job_id in _stop_requested:
+                _stop_requested.discard(job_id)
+                break
+
+            cycle += 1
+            remaining = total_secs - elapsed
+            job.progress = min(0.99, elapsed / total_secs)
+            job.message  = (
+                f"Streaming cycle {cycle} — "
+                f"{int(elapsed)}s / {int(total_secs)}s "
+                f"({int(remaining)}s left)"
+            )
+
+            # Generate one cycle of events
+            fault_events    = SCENARIOS[config.scenario]["func"](topo)
+            baseline_events = (_make_baseline(topo, config.baseline_duration)
+                               if config.mix_baseline else [])
+            all_events = sorted(fault_events + baseline_events, key=lambda x: x[0])
+
+            if not all_events:
+                await asyncio.sleep(1)
+                continue
+
+            base_ts    = datetime.utcnow()
+            prev_delta = 0.0
+
+            for delta, line, label, node_id in all_events:
+                if job_id in _stop_requested:
+                    break
+
+                # Real-time pacing
+                wait = delta - prev_delta
+                if wait > 0.01:
+                    await asyncio.sleep(wait)
+                prev_delta = delta
+
+                # Bail out if duration exceeded mid-cycle
+                if time.monotonic() - started >= total_secs:
+                    break
+
+                # Send
+                if sock is not None:   # rsyslog UDP
+                    for pkt in _build_syslog_packets(line, label, node_id, topo, base_ts, delta):
+                        try:
+                            sock.sendto(pkt, (config.rsyslog_host, config.rsyslog_port))
+                            total_sent += 1
+                        except OSError:
+                            pass
+
+                elif config.output_dest == OutputDest.VICTORIA_LOGS:
+                    # Reuse batch sender for single-event list
+                    _send_victoria_logs(
+                        [(delta, line, label, node_id)],
+                        topo, config.victoria_logs_url,
+                    )
+                    total_sent += 1
+
+            job.stats = {
+                "total_lines":  total_sent,
+                "cycles":       cycle,
+                "elapsed_sec":  round(time.monotonic() - started, 1),
+                "output_dest":  config.output_dest.value,
+                "sent_lines":   total_sent,
+            }
+
+    finally:
+        if sock is not None:
+            sock.close()
+
+    return total_sent, cycle
+
+
+# ---------------------------------------------------------------------------
+# Main simulation runner
+# ---------------------------------------------------------------------------
+
 async def run_simulation(job_id: str, config: SimConfig) -> None:
     job = _jobs[job_id]
     job.status = "running"
@@ -548,9 +689,34 @@ async def run_simulation(job_id: str, config: SimConfig) -> None:
 
         all_events.sort(key=lambda x: x[0])
 
-        # ── Route to selected output destination ─────────────────────────
+        # ── Streaming mode (duration > 0) ────────────────────────────────
         dest = config.output_dest
 
+        if config.total_duration_minutes > 0 and dest != OutputDest.GODEYE:
+            job.progress = 0.50
+            job.message  = f"Streaming for {config.total_duration_minutes} min…"
+            await asyncio.sleep(0)
+            total_sent, cycles = await _stream_loop(job_id, job, config, topo)
+
+            job.status   = "completed"
+            job.progress = 1.0
+            ge = config.godeye
+            dest_label = {
+                OutputDest.RSYSLOG_UDP:   f"rsyslog udp://{config.rsyslog_host}:{config.rsyslog_port}",
+                OutputDest.VICTORIA_LOGS: config.victoria_logs_url,
+                OutputDest.FILE:          "file",
+            }.get(dest, dest.value)
+            job.message  = (
+                f"Streamed {total_sent:,} lines in {cycles} cycles "
+                f"({config.total_duration_minutes} min) → {dest_label}"
+            )
+            if not job.stats:
+                job.stats = {}
+            job.stats.update({"cycles": cycles, "output_dest": dest.value,
+                               "sent_lines": total_sent, "total_lines": total_sent})
+            return
+
+        # ── One-shot: route to selected output destination ────────────────
         if dest == OutputDest.GODEYE:
             sent = await _run_godeye(job, config, topo, fault_events, all_events)
 

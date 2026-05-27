@@ -75,6 +75,7 @@ export default function SimulationDrawer({
   const [rsyslogPort,  setRsyslogPort]  = useState(514);
   const [victoriaUrl,  setVictoriaUrl]  = useState("http://localhost:9428/insert/jsonline");
 
+  const [durationMin, setDurationMin] = useState(0);   // 0 = one-shot
   const [jobId,   setJobId]   = useState<string | null>(null);
   const [job,     setJob]     = useState<JobResult | null>(null);
   const [running, setRunning] = useState(false);
@@ -138,6 +139,7 @@ export default function SimulationDrawer({
           rsyslog_host:      rsyslogHost,
           rsyslog_port:      rsyslogPort,
           victoria_logs_url: victoriaUrl,
+          total_duration_minutes: durationMin,
           // GodEye fields
           ...(godeyeEnabled && ge ? {
             godeye_iam_url:          ge.iamUrl,
@@ -158,7 +160,14 @@ export default function SimulationDrawer({
       setJob({ status: "failed", progress: 0, message: String(e), error: String(e) });
     }
   }, [topology, scenario, outputDir, mixBase, outputDest, rsyslogHost, rsyslogPort,
-      victoriaUrl, godeyeEnabled, godeyeConfig]);
+      victoriaUrl, durationMin, godeyeEnabled, godeyeConfig]);
+
+  const stopSim = useCallback(async () => {
+    if (!jobId) return;
+    try {
+      await fetch(`/api/jobs/${jobId}/stop`, { method: "POST" });
+    } catch {}
+  }, [jobId]);
 
   const fmtBytes = (b: number) =>
     b > 1_000_000 ? `${(b / 1e6).toFixed(1)} MB`
@@ -297,19 +306,57 @@ export default function SimulationDrawer({
             )}
           </section>
 
-          {/* ── Start button ────────────────────────────────────────────── */}
-          <button onClick={startSim} disabled={running}
-            className={`w-full py-2.5 rounded-lg font-semibold text-sm transition-colors
-                       disabled:opacity-50 disabled:cursor-not-allowed text-white
-                       ${godeyeEnabled
-                         ? "bg-green-700 hover:bg-green-600"
-                         : "bg-blue-600 hover:bg-blue-500"}`}>
-            {running
-              ? "Simulating…"
-              : godeyeEnabled
-                ? "👁  Run GodEye Simulation"
-                : "▶  Start Simulation"}
-          </button>
+          {/* ── Duration ────────────────────────────────────────────────── */}
+          <section className="space-y-1.5">
+            <label className="text-xs text-slate-400 block">Stream Duration</label>
+            <div className="flex gap-1.5 flex-wrap">
+              {[
+                { label: "One-shot", val: 0 },
+                { label: "5 min",   val: 5 },
+                { label: "15 min",  val: 15 },
+                { label: "30 min",  val: 30 },
+                { label: "1 hour",  val: 60 },
+              ].map(({ label, val }) => (
+                <button key={val} onClick={() => setDurationMin(val)}
+                  className={`px-3 py-1 rounded text-xs font-medium border transition-colors
+                    ${durationMin === val
+                      ? "bg-blue-600 border-blue-500 text-white"
+                      : "bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-500"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            {durationMin > 0 && (
+              <p className="text-[11px] text-slate-500">
+                Loops baseline → fault → baseline… for {durationMin} min with real-time pacing
+              </p>
+            )}
+          </section>
+
+          {/* ── Start / Stop buttons ─────────────────────────────────────── */}
+          <div className="flex gap-2">
+            <button onClick={startSim} disabled={running}
+              className={`flex-1 py-2.5 rounded-lg font-semibold text-sm transition-colors
+                         disabled:opacity-50 disabled:cursor-not-allowed text-white
+                         ${godeyeEnabled
+                           ? "bg-green-700 hover:bg-green-600"
+                           : "bg-blue-600 hover:bg-blue-500"}`}>
+              {running
+                ? durationMin > 0 ? "⏳ Streaming…" : "Simulating…"
+                : godeyeEnabled
+                  ? "👁  Run GodEye Simulation"
+                  : durationMin > 0
+                    ? `▶  Stream (${durationMin} min)`
+                    : "▶  Start Simulation"}
+            </button>
+            {running && durationMin > 0 && (
+              <button onClick={stopSim}
+                className="px-4 py-2.5 rounded-lg font-semibold text-sm
+                           bg-red-700 hover:bg-red-600 text-white transition-colors">
+                ■ Stop
+              </button>
+            )}
+          </div>
 
           {/* ── Progress ────────────────────────────────────────────────── */}
           {job && (
