@@ -113,7 +113,7 @@ def _parse_topology(data: Dict) -> Topology:
             protocol=e.get("protocol", "TCP"),
             port=int(e.get("port", 80)),
             critical=bool(e.get("critical", True)),
-            call_rate=float(e.get("callRate", 100.0)),
+            call_rate=float(e.get("callRate") or 100.0),
         ))
 
     for n in data.get("svcNodes", []):
@@ -135,7 +135,7 @@ def _parse_topology(data: Dict) -> Topology:
             protocol=e.get("protocol", "HTTP"),
             port=int(e.get("port", 80)),
             critical=bool(e.get("critical", True)),
-            call_rate=float(e.get("callRate", 100.0)),
+            call_rate=float(e.get("callRate") or 100.0),
         ))
 
     return topo
