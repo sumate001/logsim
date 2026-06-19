@@ -26,12 +26,13 @@ interface JobResult {
   error?: string;
 }
 
-type OutputDest = "file" | "rsyslog_udp" | "victoria_logs";
+type OutputDest = "file" | "rsyslog_udp" | "victoria_logs" | "log_analyzer";
 
 const DEST_TABS: { key: OutputDest; label: string; hint: string }[] = [
   { key: "file",          label: "📁  File",          hint: "Write .log files to a local directory" },
   { key: "rsyslog_udp",   label: "📡  rsyslog UDP",    hint: "Stream via RFC 5424 syslog over UDP" },
   { key: "victoria_logs", label: "🏔  Victoria Logs",  hint: "POST NDJSON to Victoria Logs HTTP API" },
+  { key: "log_analyzer",  label: "🤖  AIOps",          hint: "POST GodEyes JSONL to log-analyzer /ingest" },
 ];
 
 const LABEL_COL: Record<string, string> = {
@@ -74,6 +75,11 @@ export default function SimulationDrawer({
   const [rsyslogHost,  setRsyslogHost]  = useState("127.0.0.1");
   const [rsyslogPort,  setRsyslogPort]  = useState(514);
   const [victoriaUrl,  setVictoriaUrl]  = useState("http://localhost:9428/insert/jsonline");
+
+  // ── log-analyzer (AIOps) config ────────────────────────────────────────
+  const [logAnalyzerUrl,      setLogAnalyzerUrl]      = useState("http://localhost:8200");
+  const [logAnalyzerTenantId, setLogAnalyzerTenantId] = useState("logsim");
+  const [logAnalyzerAssetId,  setLogAnalyzerAssetId]  = useState("logsim-001");
 
   const [durationMin, setDurationMin] = useState(0);   // 0 = one-shot
   const [jobId,   setJobId]   = useState<string | null>(null);
@@ -139,6 +145,9 @@ export default function SimulationDrawer({
           rsyslog_host:      rsyslogHost,
           rsyslog_port:      rsyslogPort,
           victoria_logs_url: victoriaUrl,
+          log_analyzer_url:       logAnalyzerUrl,
+          log_analyzer_tenant_id: logAnalyzerTenantId,
+          log_analyzer_asset_id:  logAnalyzerAssetId,
           total_duration_minutes: durationMin,
           // GodEye fields
           ...(godeyeEnabled && ge ? {
@@ -160,7 +169,8 @@ export default function SimulationDrawer({
       setJob({ status: "failed", progress: 0, message: String(e), error: String(e) });
     }
   }, [topology, scenario, outputDir, mixBase, outputDest, rsyslogHost, rsyslogPort,
-      victoriaUrl, durationMin, godeyeEnabled, godeyeConfig]);
+      victoriaUrl, logAnalyzerUrl, logAnalyzerTenantId, logAnalyzerAssetId,
+      durationMin, godeyeEnabled, godeyeConfig]);
 
   const stopSim = useCallback(async () => {
     if (!jobId) return;
@@ -247,7 +257,7 @@ export default function SimulationDrawer({
           <section className={`space-y-3 ${godeyeEnabled ? "opacity-40 pointer-events-none" : ""}`}>
             <div>
               <label className="text-xs text-slate-400 block mb-2">Output Destination</label>
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-2 gap-1.5">
                 {DEST_TABS.map(({ key, label }) => (
                   <button
                     key={key}
@@ -302,6 +312,35 @@ export default function SimulationDrawer({
                   onChange={(e) => setVictoriaUrl(e.target.value)}
                   placeholder="http://localhost:9428/insert/jsonline"
                   className={inputCls} />
+              </div>
+            )}
+
+            {/* AIOps log-analyzer */}
+            {outputDest === "log_analyzer" && (
+              <div className="space-y-2">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Log-Analyzer URL</label>
+                  <input value={logAnalyzerUrl}
+                    onChange={(e) => setLogAnalyzerUrl(e.target.value)}
+                    placeholder="http://localhost:8200"
+                    className={inputCls} />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Tenant ID</label>
+                    <input value={logAnalyzerTenantId}
+                      onChange={(e) => setLogAnalyzerTenantId(e.target.value)}
+                      placeholder="logsim"
+                      className={inputCls} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Asset ID</label>
+                    <input value={logAnalyzerAssetId}
+                      onChange={(e) => setLogAnalyzerAssetId(e.target.value)}
+                      placeholder="logsim-001"
+                      className={inputCls} />
+                  </div>
+                </div>
               </div>
             )}
           </section>
@@ -382,27 +421,42 @@ export default function SimulationDrawer({
             <div className={`flex items-center gap-2 rounded-lg px-3 py-2.5 border
               ${job.stats.output_dest === "godeye"
                 ? "bg-green-950/60 border-green-800"
-                : "bg-indigo-950/60 border-indigo-800"}`}>
+                : job.stats.output_dest === "log_analyzer"
+                  ? "bg-purple-950/60 border-purple-800"
+                  : "bg-indigo-950/60 border-indigo-800"}`}>
               <span className="text-lg">
-                {job.stats.output_dest === "godeye"       ? "👁"
-                 : job.stats.output_dest === "rsyslog_udp"? "📡"
-                 :                                          "🏔"}
+                {job.stats.output_dest === "godeye"        ? "👁"
+                 : job.stats.output_dest === "rsyslog_udp" ? "📡"
+                 : job.stats.output_dest === "log_analyzer"? "🤖"
+                 :                                           "🏔"}
               </span>
               <div>
                 <p className={`text-xs font-semibold
-                  ${job.stats.output_dest === "godeye" ? "text-green-300" : "text-indigo-200"}`}>
+                  ${job.stats.output_dest === "godeye"
+                    ? "text-green-300"
+                    : job.stats.output_dest === "log_analyzer"
+                      ? "text-purple-300"
+                      : "text-indigo-200"}`}>
                   {job.stats.output_dest === "godeye"
                     ? "GodEye delivery complete — waiting for ml-sweep (≤15 min)"
-                    : "Delivery successful"}
+                    : job.stats.output_dest === "log_analyzer"
+                      ? "AIOps analysis complete"
+                      : "Delivery successful"}
                 </p>
                 <p className={`text-[11px]
-                  ${job.stats.output_dest === "godeye" ? "text-green-600" : "text-indigo-400"}`}>
+                  ${job.stats.output_dest === "godeye"
+                    ? "text-green-600"
+                    : job.stats.output_dest === "log_analyzer"
+                      ? "text-purple-400"
+                      : "text-indigo-400"}`}>
                   {job.stats.sent_lines.toLocaleString()} log records sent
                   {job.stats.output_dest === "godeye"
                     ? ` via OTLP → ${godeyeConfig?.otelUrl ?? ""}`
                     : job.stats.output_dest === "rsyslog_udp"
                       ? ` → rsyslog udp://${rsyslogHost}:${rsyslogPort}`
-                      : ` → ${victoriaUrl}`}
+                      : job.stats.output_dest === "log_analyzer"
+                        ? ` → ${logAnalyzerUrl}/ingest`
+                        : ` → ${victoriaUrl}`}
                 </p>
               </div>
             </div>

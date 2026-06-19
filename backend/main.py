@@ -49,6 +49,10 @@ class SimulateRequest(BaseModel):
     godeye_otel_url: str      = "http://localhost:4318"
     godeye_tenant_id: str     = "internal"
     godeye_baseline_minutes: int = 30
+    # ── Log-Analyzer (AIOps) ───────────────────────────
+    log_analyzer_url: str       = "http://localhost:8200"
+    log_analyzer_tenant_id: str = "logsim"
+    log_analyzer_asset_id: str  = "logsim-001"
     # ── Streaming ──────────────────────────────────────
     total_duration_minutes: float = 0  # 0 = one-shot
 
@@ -99,6 +103,9 @@ async def start_simulation(req: SimulateRequest, bg: BackgroundTasks):
         rsyslog_port=req.rsyslog_port,
         victoria_logs_url=req.victoria_logs_url,
         godeye=godeye_cfg,
+        log_analyzer_url=req.log_analyzer_url,
+        log_analyzer_tenant_id=req.log_analyzer_tenant_id,
+        log_analyzer_asset_id=req.log_analyzer_asset_id,
         total_duration_minutes=req.total_duration_minutes,
     )
     bg.add_task(run_simulation, job_id, config)

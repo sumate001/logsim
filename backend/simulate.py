@@ -26,6 +26,7 @@ class OutputDest(str, enum.Enum):
     RSYSLOG_UDP   = "rsyslog_udp"
     VICTORIA_LOGS = "victoria_logs"
     GODEYE        = "godeye"
+    LOG_ANALYZER  = "log_analyzer"
 
 # ---------------------------------------------------------------------------
 # Config + Job state
@@ -58,6 +59,10 @@ class SimConfig:
     victoria_logs_url: str   = "http://localhost:9428/insert/jsonline"
     # ── GodEye integration ──────────────────────────────
     godeye: Optional[GodEyeConfig] = None
+    # ── Log-Analyzer (AIOps) integration ─────────────────
+    log_analyzer_url: str       = "http://localhost:8200"
+    log_analyzer_tenant_id: str = "logsim"
+    log_analyzer_asset_id: str  = "logsim-001"
     # ── Streaming mode ───────────────────────────────────
     total_duration_minutes: float = 0  # 0 = one-shot
 
@@ -330,6 +335,110 @@ def _send_victoria_logs(
             return len(ndjson), None
     except _urllib_err.HTTPError as exc:
         return 0, f"HTTP {exc.code}: {exc.reason}"
+    except Exception as exc:
+        return 0, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Remote output: Log-Analyzer /ingest (GodEyes JSONL format)
+# ---------------------------------------------------------------------------
+
+_LABEL_SEV: Dict[str, Tuple[str, str]] = {
+    "NORMAL":       ("info",    "9"),
+    "RECOVERY_ATTEMPT": ("warning", "13"),
+    "PROPAGATION":  ("err",    "17"),
+    "SYMPTOM":      ("err",    "17"),
+    "ROOT_CAUSE":   ("err",    "17"),
+}
+
+
+def _events_to_log_entries(
+    events: List[Tuple[float, str, str, str]],
+    topo: "Topology",
+    tenant_id: str,
+    asset_id: str,
+    scenario: str,
+    base_ts: Optional[datetime] = None,
+) -> List[dict]:
+    if base_ts is None:
+        base_ts = datetime.utcnow()
+
+    all_nodes: Dict[str, Any] = {n.id: n for n in topo.net_nodes}
+    all_nodes.update({n.id: n for n in topo.svc_nodes})
+
+    entries = []
+    for delta, line, label, node_id in events:
+        node       = all_nodes.get(node_id)
+        host_label = (node.label if node else node_id) or node_id
+        tech_val   = (node.tech.value if node else "generic")
+        ts_iso     = (base_ts + timedelta(seconds=delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sev_text, sev_num = _LABEL_SEV.get(label, ("info", "9"))
+
+        for sub in line.split("\n"):
+            sub = sub.strip()
+            if not sub:
+                continue
+            entries.append({
+                "type":             "log",
+                "_time":            ts_iso,
+                "message":          sub,
+                "host":             host_label,
+                "hostname":         asset_id,
+                "service":          tech_val,
+                "severity_text":    sev_text,
+                "severity_number":  sev_num,
+                "tenant_id":        tenant_id,
+                "asset_id":         asset_id,
+                "structured_data.logsim.label":    label,
+                "structured_data.logsim.node_id":  node_id,
+                "structured_data.logsim.scenario": scenario,
+            })
+    return entries
+
+
+def _send_log_analyzer(
+    events: List[Tuple[float, str, str, str]],
+    topo: "Topology",
+    config: "SimConfig",
+    scenario: str,
+    base_ts: Optional[datetime] = None,
+) -> Tuple[int, Optional[str]]:
+    if base_ts is None:
+        base_ts = datetime.utcnow()
+
+    entries = _events_to_log_entries(
+        events, topo,
+        config.log_analyzer_tenant_id,
+        config.log_analyzer_asset_id,
+        scenario, base_ts,
+    )
+    if not entries:
+        return 0, None
+
+    # Compute explicit window from event deltas (ensure from < to by at least 1s)
+    deltas = [d for d, _, _, _ in events]
+    window_from = base_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    span = max(deltas) if deltas else 0
+    window_to = (base_ts + timedelta(seconds=max(span, 1))).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    payload = json.dumps({
+        "entries":      entries,
+        "tenant_id":    config.log_analyzer_tenant_id,
+        "window_from":  window_from,
+        "window_to":    window_to,
+    }, ensure_ascii=False).encode("utf-8")
+    url = config.log_analyzer_url.rstrip("/") + "/ingest"
+    req = _urllib_req.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with _urllib_req.urlopen(req, timeout=180) as resp:
+            resp.read()
+            return len(entries), None
+    except _urllib_err.HTTPError as exc:
+        body = exc.read(512).decode("utf-8", errors="replace")
+        return 0, f"HTTP {exc.code}: {body}"
     except Exception as exc:
         return 0, str(exc)
 
@@ -636,6 +745,13 @@ async def _stream_loop(
                     )
                     total_sent += 1
 
+                elif config.output_dest == OutputDest.LOG_ANALYZER:
+                    _send_log_analyzer(
+                        [(delta, line, label, node_id)],
+                        topo, config, config.scenario, base_ts,
+                    )
+                    total_sent += 1
+
             job.stats = {
                 "total_lines":  total_sent,
                 "cycles":       cycle,
@@ -742,6 +858,15 @@ async def run_simulation(job_id: str, config: SimConfig) -> None:
                 raise RuntimeError(f"Victoria Logs: {err}")
             _write_ground_truth(config.output_dir, all_events)
 
+        elif dest == OutputDest.LOG_ANALYZER:
+            job.progress = 0.65
+            job.message = f"Sending to log-analyzer {config.log_analyzer_url}…"
+            await asyncio.sleep(0)
+            sent, err = _send_log_analyzer(all_events, topo, config, config.scenario)
+            if err:
+                raise RuntimeError(f"log-analyzer: {err}")
+            _write_ground_truth(config.output_dir, all_events)
+
         else:   # OutputDest.FILE (default)
             sent = 0
             job.progress = 0.65
@@ -789,6 +914,7 @@ async def run_simulation(job_id: str, config: SimConfig) -> None:
             OutputDest.RSYSLOG_UDP:   f"rsyslog udp://{config.rsyslog_host}:{config.rsyslog_port}",
             OutputDest.VICTORIA_LOGS: config.victoria_logs_url,
             OutputDest.GODEYE:        ge.otel_url if ge else "godeye",
+            OutputDest.LOG_ANALYZER:  config.log_analyzer_url,
         }.get(dest, "file")
 
         job.status = "completed"
