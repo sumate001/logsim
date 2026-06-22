@@ -232,6 +232,28 @@ def health():
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------------
+# Log-Analyzer callback receiver
+# ---------------------------------------------------------------------------
+
+_analysis_results: list[dict] = []   # latest 20 results (newest first)
+_MAX_RESULTS = 20
+
+
+@app.post("/api/analysis-callback")
+async def analysis_callback(payload: dict):
+    """Receive AnalyzeResponse from log-analyzer after /ingest."""
+    _analysis_results.insert(0, payload)
+    if len(_analysis_results) > _MAX_RESULTS:
+        _analysis_results.pop()
+    return {"status": "ok"}
+
+
+@app.get("/api/analysis-results")
+def get_analysis_results():
+    return {"results": _analysis_results}
+
+
 @app.post("/api/update")
 def update_from_github():
     """Pull latest code from GitHub and restart services if on server."""

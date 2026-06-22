@@ -5,6 +5,7 @@ import NodePanel from "@/components/NodePanel";
 import SimulationDrawer from "@/components/SimulationDrawer";
 import Toast from "@/components/Toast";
 import GodEyePanel, { GodEyeConfig, DEFAULT_GODEYE_CONFIG } from "@/components/GodEyePanel";
+import AnalysisResultsPanel from "@/components/AnalysisResultsPanel";
 import {
   TopologyData, TopologyNode, TopologyEdge,
   NodeRole, NodeTech,
@@ -403,6 +404,9 @@ export default function Home() {
         pendingCleanup={godeyePending}
         lastJobId={godeyeLastJob}
       />
+
+      {/* ── Analysis Results Panel ───────────────────────────────────────── */}
+      <AnalysisResultsPanel />
 
       {/* ── Canvas + Right Panel ──────────────────────────────────────────── */}
       <div className="flex flex-1 min-h-0">

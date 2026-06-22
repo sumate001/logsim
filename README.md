@@ -143,6 +143,7 @@ npm run dev                      # เปิดที่ http://localhost:3000
 | 📁 **File** | เขียนไฟล์ `.log` ต่อ node ลง local directory | Output Directory |
 | 📡 **rsyslog UDP** | ส่ง log เป็น RFC 5424 UDP packet ทุกบรรทัด | Host + Port (default `127.0.0.1:514`) |
 | 🏔 **Victoria Logs** | POST NDJSON batch ไปยัง `/insert/jsonline` | Ingest URL (default `http://localhost:9428/insert/jsonline`) |
+| 🤖 **AIOps** | POST GodEyes JSONL ไปยัง log-analyzer `/ingest` | log-analyzer URL + tenant_id + asset_id |
 
 > **หมายเหตุ**: `ground_truth.log` และ `ground_truth.json` เขียนลง local เสมอทุก mode เพื่อแสดงสถิติใน UI
 
@@ -230,6 +231,8 @@ SYMPTOM|lb1|+20.0s|haproxy[12345]: Server app_backend/app-01 is DOWN
 | `GET` | `/api/jobs/{job_id}` | ดู status และผลลัพธ์ |
 | `GET` | `/api/logs` | list ไฟล์ใน output directory |
 | `GET` | `/api/logs/{filename}` | ดู N บรรทัดสุดท้ายของไฟล์ |
+| `POST` | `/api/analysis-callback` | รับผล MoA analysis จาก log-analyzer (GodEye callback) |
+| `GET` | `/api/analysis-results` | ดูผล analysis ที่ได้รับล่าสุด (max 20) |
 | `GET` | `/health` | health check |
 
 #### POST /api/simulate — request body
@@ -275,6 +278,8 @@ logsim2/
             ├── NodePanel.tsx
             ├── SimulationDrawer.tsx
             ├── LogPreview.tsx
+            ├── GodEyePanel.tsx
+            ├── AnalysisResultsPanel.tsx   ← แสดงผล MoA callback จาก log-analyzer
             └── Toast.tsx
 ```
 
