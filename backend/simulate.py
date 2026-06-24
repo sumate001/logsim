@@ -63,8 +63,10 @@ class SimConfig:
     log_analyzer_url: str       = "http://localhost:8200"
     log_analyzer_tenant_id: str = "logsim"
     log_analyzer_asset_id: str  = "logsim-001"
+    log_analyzer_callback_url: str = ""  # POST AnalyzeResponse back here after analysis
     # ── Streaming mode ───────────────────────────────────
     total_duration_minutes: float = 0  # 0 = one-shot
+    stream_batch_seconds: float   = 5.0  # buffer window for streaming→log_analyzer batches
 
 
 @dataclass
@@ -344,12 +346,15 @@ def _send_victoria_logs(
 # ---------------------------------------------------------------------------
 
 _LABEL_SEV: Dict[str, Tuple[str, str]] = {
-    "NORMAL":       ("info",    "9"),
+    "NORMAL":           ("info",    "9"),
     "RECOVERY_ATTEMPT": ("warning", "13"),
-    "PROPAGATION":  ("err",    "17"),
-    "SYMPTOM":      ("err",    "17"),
-    "ROOT_CAUSE":   ("err",    "17"),
+    "PROPAGATION":      ("err",    "17"),
+    "SYMPTOM":          ("err",    "17"),
+    "ROOT_CAUSE":       ("err",    "17"),
 }
+
+# MySQL slow-query log header lines — metadata, not error messages
+_MYSQL_SLOW_QUERY_PREFIXES = ("# Time:", "# User@Host:", "# Query_time:", "SET timestamp=")
 
 
 def _events_to_log_entries(
@@ -377,6 +382,10 @@ def _events_to_log_entries(
         for sub in line.split("\n"):
             sub = sub.strip()
             if not sub:
+                continue
+            # Skip MySQL slow-query log metadata headers — they are not meaningful
+            # error messages and pollute top_errors with noise like "# Time: ..."
+            if sub.startswith(_MYSQL_SLOW_QUERY_PREFIXES):
                 continue
             entries.append({
                 "type":             "log",
@@ -421,12 +430,16 @@ def _send_log_analyzer(
     span = max(deltas) if deltas else 0
     window_to = (base_ts + timedelta(seconds=max(span, 1))).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    payload = json.dumps({
+    body: Dict[str, Any] = {
         "entries":      entries,
         "tenant_id":    config.log_analyzer_tenant_id,
         "window_from":  window_from,
         "window_to":    window_to,
-    }, ensure_ascii=False).encode("utf-8")
+    }
+    if config.log_analyzer_callback_url:
+        body["callback_url"] = config.log_analyzer_callback_url
+
+    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     url = config.log_analyzer_url.rstrip("/") + "/ingest"
     req = _urllib_req.Request(
         url, data=payload, method="POST",
@@ -714,11 +727,15 @@ async def _stream_loop(
             base_ts    = datetime.utcnow()
             prev_delta = 0.0
 
+            # For LOG_ANALYZER: collect the whole cycle then send as one batch.
+            # For UDP/VL: send per-event with real-time pacing.
+            log_analyzer_batch: List[Tuple[float, str, str, str]] = []
+
             for delta, line, label, node_id in all_events:
                 if job_id in _stop_requested:
                     break
 
-                # Real-time pacing
+                # Real-time pacing (always — preserves temporal realism)
                 wait = delta - prev_delta
                 if wait > 0.01:
                     await asyncio.sleep(wait)
@@ -738,7 +755,6 @@ async def _stream_loop(
                             pass
 
                 elif config.output_dest == OutputDest.VICTORIA_LOGS:
-                    # Reuse batch sender for single-event list
                     _send_victoria_logs(
                         [(delta, line, label, node_id)],
                         topo, config.victoria_logs_url,
@@ -746,11 +762,14 @@ async def _stream_loop(
                     total_sent += 1
 
                 elif config.output_dest == OutputDest.LOG_ANALYZER:
-                    _send_log_analyzer(
-                        [(delta, line, label, node_id)],
-                        topo, config, config.scenario, base_ts,
-                    )
-                    total_sent += 1
+                    log_analyzer_batch.append((delta, line, label, node_id))
+
+            # Send accumulated LOG_ANALYZER batch as one request per cycle
+            if log_analyzer_batch:
+                sent, err = _send_log_analyzer(
+                    log_analyzer_batch, topo, config, config.scenario, base_ts,
+                )
+                total_sent += sent if not err else 0
 
             job.stats = {
                 "total_lines":  total_sent,

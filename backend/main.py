@@ -53,8 +53,10 @@ class SimulateRequest(BaseModel):
     log_analyzer_url: str       = "http://localhost:8200"
     log_analyzer_tenant_id: str = "logsim"
     log_analyzer_asset_id: str  = "logsim-001"
+    log_analyzer_callback_url: str = ""  # POST AnalyzeResponse back here; empty = disabled
     # ── Streaming ──────────────────────────────────────
     total_duration_minutes: float = 0  # 0 = one-shot
+    stream_batch_seconds: float   = 5.0  # buffer window for streaming→log_analyzer batches
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +108,9 @@ async def start_simulation(req: SimulateRequest, bg: BackgroundTasks):
         log_analyzer_url=req.log_analyzer_url,
         log_analyzer_tenant_id=req.log_analyzer_tenant_id,
         log_analyzer_asset_id=req.log_analyzer_asset_id,
+        log_analyzer_callback_url=req.log_analyzer_callback_url,
         total_duration_minutes=req.total_duration_minutes,
+        stream_batch_seconds=req.stream_batch_seconds,
     )
     bg.add_task(run_simulation, job_id, config)
     return {"job_id": job_id}

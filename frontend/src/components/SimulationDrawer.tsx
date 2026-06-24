@@ -77,9 +77,10 @@ export default function SimulationDrawer({
   const [victoriaUrl,  setVictoriaUrl]  = useState("http://localhost:9428/insert/jsonline");
 
   // ── log-analyzer (AIOps) config ────────────────────────────────────────
-  const [logAnalyzerUrl,      setLogAnalyzerUrl]      = useState("http://localhost:8200");
-  const [logAnalyzerTenantId, setLogAnalyzerTenantId] = useState("logsim");
-  const [logAnalyzerAssetId,  setLogAnalyzerAssetId]  = useState("logsim-001");
+  const [logAnalyzerUrl,         setLogAnalyzerUrl]         = useState("http://localhost:8200");
+  const [logAnalyzerTenantId,    setLogAnalyzerTenantId]    = useState("logsim");
+  const [logAnalyzerAssetId,     setLogAnalyzerAssetId]     = useState("logsim-001");
+  const [logAnalyzerCallbackUrl, setLogAnalyzerCallbackUrl] = useState("http://localhost:8000/api/analysis-callback");
 
   const [durationMin, setDurationMin] = useState(0);   // 0 = one-shot
   const [jobId,   setJobId]   = useState<string | null>(null);
@@ -145,9 +146,10 @@ export default function SimulationDrawer({
           rsyslog_host:      rsyslogHost,
           rsyslog_port:      rsyslogPort,
           victoria_logs_url: victoriaUrl,
-          log_analyzer_url:       logAnalyzerUrl,
-          log_analyzer_tenant_id: logAnalyzerTenantId,
-          log_analyzer_asset_id:  logAnalyzerAssetId,
+          log_analyzer_url:          logAnalyzerUrl,
+          log_analyzer_tenant_id:    logAnalyzerTenantId,
+          log_analyzer_asset_id:     logAnalyzerAssetId,
+          log_analyzer_callback_url: logAnalyzerCallbackUrl,
           total_duration_minutes: durationMin,
           // GodEye fields
           ...(godeyeEnabled && ge ? {
@@ -170,7 +172,7 @@ export default function SimulationDrawer({
     }
   }, [topology, scenario, outputDir, mixBase, outputDest, rsyslogHost, rsyslogPort,
       victoriaUrl, logAnalyzerUrl, logAnalyzerTenantId, logAnalyzerAssetId,
-      durationMin, godeyeEnabled, godeyeConfig]);
+      logAnalyzerCallbackUrl, durationMin, godeyeEnabled, godeyeConfig]);
 
   const stopSim = useCallback(async () => {
     if (!jobId) return;
@@ -340,6 +342,16 @@ export default function SimulationDrawer({
                       placeholder="logsim-001"
                       className={inputCls} />
                   </div>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">
+                    Callback URL
+                    <span className="text-slate-600 ml-1">(optional — POST result back here)</span>
+                  </label>
+                  <input value={logAnalyzerCallbackUrl}
+                    onChange={(e) => setLogAnalyzerCallbackUrl(e.target.value)}
+                    placeholder="http://localhost:8000/api/analysis-callback"
+                    className={inputCls} />
                 </div>
               </div>
             )}
