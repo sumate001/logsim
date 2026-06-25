@@ -56,8 +56,8 @@ free_port() {
     sleep 0.4
   fi
 }
-free_port 8000
-free_port 3000
+free_port 8071
+free_port 3200
 
 # ─── Signal handler ──────────────────────────────────────────────────────────
 cleanup() {
@@ -76,9 +76,9 @@ printf "\n"
 printf "  ${BOLD}╔═══════════════════════════════════════════════╗${R}\n"
 printf "  ${BOLD}║   LogSim2 — Topology-Aware Log Simulator     ║${R}\n"
 printf "  ${BOLD}╠═══════════════════════════════════════════════╣${R}\n"
-printf "  ${BOLD}║${R}  ${B}●${R} Backend API  ${DIM}→${R}  http://localhost:8000      ${BOLD}║${R}\n"
-printf "  ${BOLD}║${R}  ${B}●${R} Swagger UI   ${DIM}→${R}  http://localhost:8000/docs ${BOLD}║${R}\n"
-printf "  ${BOLD}║${R}  ${G}●${R} Frontend     ${DIM}→${R}  http://localhost:3000      ${BOLD}║${R}\n"
+printf "  ${BOLD}║${R}  ${B}●${R} Backend API  ${DIM}→${R}  http://localhost:8071      ${BOLD}║${R}\n"
+printf "  ${BOLD}║${R}  ${B}●${R} Swagger UI   ${DIM}→${R}  http://localhost:8071/docs ${BOLD}║${R}\n"
+printf "  ${BOLD}║${R}  ${G}●${R} Frontend     ${DIM}→${R}  http://localhost:3200      ${BOLD}║${R}\n"
 printf "  ${BOLD}╠═══════════════════════════════════════════════╣${R}\n"
 printf "  ${BOLD}║${R}  ${Y}Ctrl+C${R} to stop both services               ${BOLD}║${R}\n"
 printf "  ${BOLD}╚═══════════════════════════════════════════════╝${R}\n\n"
@@ -87,7 +87,7 @@ printf "  ${BOLD}╚════════════════════
 (
   cd "$ROOT/backend"
   source .venv/bin/activate
-  exec uvicorn main:app --reload --host 0.0.0.0 --port 8000 2>&1
+  exec uvicorn main:app --reload --host 0.0.0.0 --port 8071 2>&1
 ) | awk -v tag="${B}[backend] ${R}" '{ print tag $0; fflush() }' &
 
 # ─── Launch frontend ─────────────────────────────────────────────────────────

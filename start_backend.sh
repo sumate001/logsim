@@ -13,8 +13,8 @@ pip install -q -r requirements.txt
 
 echo ""
 echo "  ╔══════════════════════════════════════╗"
-echo "  ║  LogSim2 Backend  →  :8000           ║"
+echo "  ║  LogSim2 Backend  →  :8071           ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
 
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8071

@@ -8,7 +8,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Browser (Next.js :3000)                                        │
+│  Browser (Next.js :3200)                                        │
 │  ┌─────────────────────────────────┐  ┌───────────────────────┐ │
 │  │  Topology Canvas (SVG)          │  │  Properties Panel     │ │
 │  │  • drag-and-drop nodes          │  │  • edit node/edge     │ │
@@ -22,7 +22,7 @@
                           │  POST /api/simulate
                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  FastAPI Backend (:8000)                                        │
+│  FastAPI Backend (:8071)                                        │
 │  scenarios.py → simulate.py                                     │
 │                    │                                            │
 │                    ├─ [file]          → per-source .log files   │
@@ -56,9 +56,9 @@ script จะติดตั้ง dependencies อัตโนมัติใ�
 
 | บริการ | URL |
 |--------|-----|
-| Frontend | http://localhost:3000 |
-| Backend API | http://localhost:8000 |
-| Swagger UI | http://localhost:8000/docs |
+| Frontend | http://localhost:3200 |
+| Backend API | http://localhost:8071 |
+| Swagger UI | http://localhost:8071/docs |
 
 กด **Ctrl+C** หยุดทั้งคู่พร้อมกัน
 
@@ -74,7 +74,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --port 8071
 ```
 </details>
 
@@ -84,7 +84,7 @@ uvicorn main:app --reload --port 8000
 ```bash
 cd frontend
 npm install
-npm run dev                      # เปิดที่ http://localhost:3000
+npm run dev                      # เปิดที่ http://localhost:3200
 ```
 </details>
 
@@ -250,7 +250,7 @@ SYMPTOM|lb1|+20.0s|haproxy[12345]: Server app_backend/app-01 is DOWN
 }
 ```
 
-ดูรายละเอียดได้ที่ http://localhost:8000/docs
+ดูรายละเอียดได้ที่ http://localhost:8071/docs
 
 ---
 

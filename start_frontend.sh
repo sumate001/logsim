@@ -9,7 +9,7 @@ fi
 
 echo ""
 echo "  ╔══════════════════════════════════════╗"
-echo "  ║  LogSim2 Frontend  →  :3000          ║"
+echo "  ║  LogSim2 Frontend  →  :3200          ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
 
