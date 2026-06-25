@@ -80,7 +80,7 @@ export default function SimulationDrawer({
   const [logAnalyzerUrl,         setLogAnalyzerUrl]         = useState("http://localhost:8200");
   const [logAnalyzerTenantId,    setLogAnalyzerTenantId]    = useState("logsim");
   const [logAnalyzerAssetId,     setLogAnalyzerAssetId]     = useState("logsim-001");
-  const [logAnalyzerCallbackUrl, setLogAnalyzerCallbackUrl] = useState("http://localhost:8000/api/analysis-callback");
+  const [logAnalyzerCallbackUrl, setLogAnalyzerCallbackUrl] = useState("http://localhost:8071/api/analysis-callback");
 
   const [durationMin, setDurationMin] = useState(0);   // 0 = one-shot
   const [jobId,   setJobId]   = useState<string | null>(null);
@@ -350,7 +350,7 @@ export default function SimulationDrawer({
                   </label>
                   <input value={logAnalyzerCallbackUrl}
                     onChange={(e) => setLogAnalyzerCallbackUrl(e.target.value)}
-                    placeholder="http://localhost:8000/api/analysis-callback"
+                    placeholder="http://localhost:8071/api/analysis-callback"
                     className={inputCls} />
                 </div>
               </div>
