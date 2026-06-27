@@ -27,7 +27,8 @@
 │                    │                                            │
 │                    ├─ [file]          → per-source .log files   │
 │                    ├─ [rsyslog_udp]   → UDP syslog (RFC 5424)   │
-│                    └─ [victoria_logs] → HTTP NDJSON POST        │
+│                    ├─ [victoria_logs] → HTTP NDJSON POST        │
+│                    └─ [log_analyzer]  → HTTP JSON POST /ingest  │
 │                    (ground_truth.json / .log เสมอ)              │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -187,7 +188,7 @@ npm run dev                      # เปิดที่ http://localhost:3200
 └── ground_truth.json          # structured version สำหรับ machine consumption
 ```
 
-### Mode: rsyslog UDP / Victoria Logs
+### Mode: rsyslog UDP / Victoria Logs / AIOps (log_analyzer)
 
 ```
 /tmp/logsim2_output/
@@ -196,7 +197,7 @@ npm run dev                      # เปิดที่ http://localhost:3200
 ```
 
 per-source `.log` จะไม่ถูกเขียน — log ถูกส่งไปยัง remote endpoint แทน  
-UI แสดง banner "Delivered X lines to rsyslog/Victoria Logs" เมื่อสำเร็จ
+UI แสดง banner "Delivered X lines to rsyslog/Victoria Logs/log-analyzer" เมื่อสำเร็จ
 
 ### ground_truth.log format
 
@@ -218,6 +219,179 @@ SYMPTOM|lb1|+20.0s|haproxy[12345]: Server app_backend/app-01 is DOWN
     "line": "# Time: 2025-01-01T10:00:00.000000"
   }
 ]
+```
+
+---
+
+## AIOps Integration (log_analyzer)
+
+โหมด **AIOps** ส่ง log ทั้งหมดไปยัง log-analyzer ผ่าน HTTP POST พร้อม metadata ที่ครบถ้วนสำหรับงาน root-cause analysis
+
+### Endpoint ที่ใช้
+
+```
+POST <log_analyzer_url>/ingest
+Content-Type: application/json
+```
+
+default URL คือ `http://localhost:8200` (กำหนดได้ใน UI หรือ request body)
+
+---
+
+### Request Body
+
+```json
+{
+  "tenant_id":   "logsim",
+  "window_from": "2026-06-27T10:00:00Z",
+  "window_to":   "2026-06-27T10:05:01Z",
+  "entries": [ ... ]
+}
+```
+
+| Field | ประเภท | คำอธิบาย |
+|-------|--------|----------|
+| `tenant_id` | string | กำหนดได้ใน UI (default `"logsim"`) |
+| `window_from` | ISO 8601 UTC | timestamp ของ event แรก |
+| `window_to` | ISO 8601 UTC | timestamp ของ event สุดท้าย + อย่างน้อย 1 วินาที |
+| `entries` | array | log entry ทุกบรรทัดของ simulation |
+
+---
+
+### Log Entry Format
+
+แต่ละ entry ใน `entries` มีโครงสร้างดังนี้:
+
+```json
+{
+  "type":            "log",
+  "_time":           "2026-06-27T10:01:30Z",
+  "message":         "Connection refused to DB at 127.0.0.1:3306",
+  "host":            "api-server",
+  "hostname":        "logsim-001",
+  "service":         "nginx",
+  "severity_text":   "err",
+  "severity_number": "17",
+  "tenant_id":       "logsim",
+  "asset_id":        "logsim-001",
+  "structured_data.logsim.label":    "ROOT_CAUSE",
+  "structured_data.logsim.node_id":  "node-3",
+  "structured_data.logsim.scenario": "mysql_cascade"
+}
+```
+
+#### คำอธิบายแต่ละ field
+
+| Field | มาจาก | ตัวอย่าง |
+|-------|-------|----------|
+| `type` | hardcoded | `"log"` |
+| `_time` | `base_ts` + `delta` ของ event | `"2026-06-27T10:01:30Z"` |
+| `message` | log line ที่ simulator สร้าง (ทีละบรรทัด) | `"Deadlock found when trying to get lock"` |
+| `host` | `node.label` จาก topology | `"mysql-primary"` |
+| `hostname` | `asset_id` ที่กำหนดใน config | `"logsim-001"` |
+| `service` | `node.tech` (เทคโนโลยีของ node) | `"mysql"`, `"nginx"`, `"redis"` |
+| `severity_text` | แปลงจาก label (ดูตารางด้านล่าง) | `"err"` |
+| `severity_number` | แปลงจาก label (ดูตารางด้านล่าง) | `"17"` |
+| `tenant_id` | `log_analyzer_tenant_id` ใน config | `"logsim"` |
+| `asset_id` | `log_analyzer_asset_id` ใน config | `"logsim-001"` |
+| `structured_data.logsim.label` | ground truth label | `"ROOT_CAUSE"` |
+| `structured_data.logsim.node_id` | ID ของ node ที่สร้าง log | `"node-3"` |
+| `structured_data.logsim.scenario` | ชื่อ fault scenario | `"mysql_cascade"` |
+
+> หมายเหตุ: ถ้า log line ของ event หนึ่งมีหลายบรรทัด (`\n`) ระบบจะแยกเป็นหลาย entry โดยแต่ละบรรทัดมี timestamp เดียวกัน
+
+#### Label → Severity Mapping
+
+| Label | `severity_text` | `severity_number` | ความหมาย |
+|-------|----------------|-------------------|----------|
+| `NORMAL` | `info` | `9` | traffic ปกติ |
+| `RECOVERY_ATTEMPT` | `warning` | `13` | กำลังพยายาม recover |
+| `PROPAGATION` | `err` | `17` | ผลกระทบที่แพร่กระจาย |
+| `SYMPTOM` | `err` | `17` | อาการที่ user มองเห็น |
+| `ROOT_CAUSE` | `err` | `17` | จุดเริ่มต้นของปัญหา |
+
+`severity_number` ใช้มาตรฐาน [RFC 5424 syslog severity](https://datatracker.ietf.org/doc/html/rfc5424#section-6.2.1)
+
+---
+
+### สองโหมดการส่ง
+
+#### Batch mode (default)
+
+ใช้เมื่อ **ไม่ได้** เปิด streaming — simulator รัน scenario ให้เสร็จก่อน จากนั้นส่ง entries ทั้งหมดในครั้งเดียว
+
+```
+simulate() → รวบรวม events ทั้งหมด → POST /ingest (ครั้งเดียว)
+```
+
+**ข้อดี:** สามารถคำนวณ `window_from` / `window_to` ที่แม่นยำได้  
+**ข้อเสีย:** log-analyzer ได้รับข้อมูลหลังจาก simulation เสร็จแล้วเท่านั้น
+
+#### Streaming mode (continuous)
+
+ใช้เมื่อเปิด **Continuous Streaming** — ส่ง batch ทุก ๆ ช่วงเวลาระหว่างที่ simulator กำลังทำงาน
+
+```
+simulate() → ส่ง batch ย่อย → ส่ง batch ย่อย → ... → simulation จบ
+```
+
+**ข้อดี:** log-analyzer ได้รับ log แบบ near-realtime  
+**ข้อเสีย:** `window_to` ของแต่ละ batch คือ timestamp ของ event สุดท้ายใน batch นั้น
+
+---
+
+### Config Fields
+
+| Field | Request body key | Default | UI Label |
+|-------|-----------------|---------|----------|
+| URL | `log_analyzer_url` | `http://localhost:8200` | AIOps URL |
+| Tenant ID | `log_analyzer_tenant_id` | `logsim` | Tenant ID |
+| Asset ID | `log_analyzer_asset_id` | `logsim-001` | Asset ID |
+
+`tenant_id` และ `asset_id` ถูกฝังทั้งใน top-level payload และในแต่ละ entry เพื่อให้ log-analyzer filter ได้ทั้งสองระดับ
+
+---
+
+### ตัวอย่าง Payload เต็ม
+
+```json
+{
+  "tenant_id":   "prod-cluster",
+  "window_from": "2026-06-27T10:00:00Z",
+  "window_to":   "2026-06-27T10:05:01Z",
+  "entries": [
+    {
+      "type":            "log",
+      "_time":           "2026-06-27T10:00:00Z",
+      "message":         "InnoDB: page_cleaner: 1000ms intended loop took 4523ms",
+      "host":            "mysql-primary",
+      "hostname":        "prod-001",
+      "service":         "mysql",
+      "severity_text":   "err",
+      "severity_number": "17",
+      "tenant_id":       "prod-cluster",
+      "asset_id":        "prod-001",
+      "structured_data.logsim.label":    "ROOT_CAUSE",
+      "structured_data.logsim.node_id":  "db-node-1",
+      "structured_data.logsim.scenario": "mysql_cascade"
+    },
+    {
+      "type":            "log",
+      "_time":           "2026-06-27T10:00:11Z",
+      "message":         "upstream timed out (110: Connection timed out) while reading response header from upstream",
+      "host":            "api-server",
+      "hostname":        "prod-001",
+      "service":         "nginx",
+      "severity_text":   "err",
+      "severity_number": "17",
+      "tenant_id":       "prod-cluster",
+      "asset_id":        "prod-001",
+      "structured_data.logsim.label":    "PROPAGATION",
+      "structured_data.logsim.node_id":  "web-node-2",
+      "structured_data.logsim.scenario": "mysql_cascade"
+    }
+  ]
+}
 ```
 
 ---
@@ -246,7 +420,10 @@ SYMPTOM|lb1|+20.0s|haproxy[12345]: Server app_backend/app-01 is DOWN
   "output_dir":        "/tmp/logsim2_output",  // ใช้เมื่อ output_dest = "file"
   "rsyslog_host":      "127.0.0.1",       // ใช้เมื่อ output_dest = "rsyslog_udp"
   "rsyslog_port":      514,
-  "victoria_logs_url": "http://localhost:9428/insert/jsonline"  // victoria_logs
+  "victoria_logs_url":        "http://localhost:9428/insert/jsonline",  // victoria_logs
+  "log_analyzer_url":         "http://localhost:8200",   // log_analyzer
+  "log_analyzer_tenant_id":   "logsim",
+  "log_analyzer_asset_id":    "logsim-001"
 }
 ```
 
