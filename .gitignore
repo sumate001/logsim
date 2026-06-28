@@ -31,3 +31,6 @@ Thumbs.db
 .env.local
 *.pem
 *.key
+
+# logsim runtime (background mode)
+.run/
