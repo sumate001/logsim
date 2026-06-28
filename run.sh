@@ -179,9 +179,9 @@ cmd_stop() {
 
 # ─── Status ──────────────────────────────────────────────────────────────────
 cmd_status() {
-  for entry in "Backend (:8071):$BACKEND_PID" "Frontend (:3200):$FRONTEND_PID"; do
-    local name=${entry%%:*}
-    local pidfile=${entry##*:}
+  for entry in "Backend (:8071)|$BACKEND_PID" "Frontend (:3200)|$FRONTEND_PID"; do
+    local name=${entry%%|*}
+    local pidfile=${entry##*|}
     if is_running "$pidfile"; then
       printf "  ${G}●${R} %-18s running ${DIM}(PID %s)${R}\n" "$name" "$(cat "$pidfile")"
     else
